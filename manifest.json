@@ -1,0 +1,89 @@
+{
+  "package": {
+    "name": "hermes-tradedesk",
+    "version": "0.2.0",
+    "schema_version": 2
+  },
+  "reference_hermes_commit": "49f8f548bf7df7c9bd63765e1807ea2e9d2def36",
+  "compat_model": "structural",
+  "compat_notes": "Hermes commit equality is NOT required. install.sh verifies required integration CONTRACTS at install time: (1) plugins/platforms/telegram/shared_selectors.py exports {account_keyboard, account_prompt, exchange_keyboard, exchange_prompt, lighter_account_keyboard}; (2) plugins/platforms/telegram/_positions_render.py exists; (3) hermes_cli package importable; (4) Python deps eth_account, eth_abi, eth_utils, cryptography, base58, requests, solders, lighter all present; (5) telegram Python package importable.",
+  "compatibility_checks": {
+    "required_files": [
+      "plugins/platforms/telegram/shared_selectors.py",
+      "plugins/platforms/telegram/_positions_render.py"
+    ],
+    "required_python_imports": [
+      "hermes_cli",
+      "telegram",
+      "eth_account",
+      "eth_abi",
+      "eth_utils",
+      "cryptography",
+      "base58",
+      "requests",
+      "solders",
+      "lighter"
+    ],
+    "required_symbols": {
+      "plugins.platforms.telegram.shared_selectors": [
+        "account_keyboard",
+        "account_prompt",
+        "exchange_keyboard",
+        "exchange_prompt",
+        "lighter_account_keyboard"
+      ]
+    }
+  },
+  "supported_exchanges": [
+    "hyperliquid",
+    "lighter",
+    "raydium",
+    "pacifica",
+    "afx",
+    "apex",
+    "rise"
+  ],
+  "required_files": {
+    "tradedesk/tradedesk.py": "TradeDesk core (normalize + execute)",
+    "tradedesk/router.py": "exchange -> agent routing",
+    "tradedesk/request_utils.py": "request field helpers",
+    "tradedesk/account_discovery.py": "per-exchange env-var credential scanning",
+    "tradedesk/hyperliquid_agent.py": "Hyperliquid read+write+TP/SL+ladder",
+    "tradedesk/lighter_agent.py": "Lighter read+write+TP/SL+ladder",
+    "tradedesk/raydium_agent.py": "Raydium read+single-order+grouped-cancel+TP/SL",
+    "tradedesk/raydium_write.py": "Raydium write helpers (signing, payload)",
+    "tradedesk/pacifica_agent.py": "Pacifica read+write+TP/SL+ladder",
+    "tradedesk/pacifica_tpsl.py": "Pacifica TP/SL payload encoding",
+    "tradedesk/afx_agent.py": "AFX read+write+TP/SL+ladder",
+    "tradedesk/apex_agent.py": "ApeX read+write+TP/SL+ladder",
+    "tradedesk/rise_agent.py": "Rise read+write+TP/SL via EIP-712 typed-data"
+  },
+  "integration_files": {
+    "hermes_overlay/telegram/trade_menu/__init__.py": "Telegram /trade registration hook",
+    "hermes_overlay/telegram/trade_menu/wizard.py": "Telegram /trade wizard (state machine + Telegram message rendering)"
+  },
+  "installation_destinations": {
+    "trades_desk_modules": "/usr/local/lib/hermes-agent/tradedesk/",
+    "telegram_wizard": "/usr/local/lib/hermes-agent/plugins/platforms/telegram/trade_menu/"
+  },
+  "verification_command": "./verify.sh",
+  "installer_command": "sudo ./install.sh",
+  "python_dependencies": [
+    "Decimal/int/str (stdlib)",
+    "urllib (stdlib)",
+    "eth_account (EIP-712 typed-data for exchange-write helpers)",
+    "eth_abi, eth_utils, cryptography, base58 (EVM signing)",
+    "solders (Solana signing)",
+    "lighter (Lighter SDK)",
+    "exchange-specific SDK packages (already required by the reference Hermes install)"
+  ],
+  "security": {
+    "preserves_auth_json": true,
+    "preserves_dotenv": true,
+    "no_live_writes_in_installer": true,
+    "no_live_writes_in_verify_sh": true,
+    "no_credentials_in_repo": true,
+    "instance_aliases_in_code": 0,
+    "instance_aliases_in_examples": 0
+  }
+}

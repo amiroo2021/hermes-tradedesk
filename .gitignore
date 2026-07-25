@@ -1,0 +1,50 @@
+# Secrets / credentials — NEVER commit
+.env
+.env.*
+!.env.example
+
+auth.json
+*auth*.json
+credentials*
+secrets*
+
+*.pem
+*.key
+*.p12
+*.pfx
+
+id_rsa
+id_ed25519
+
+# Hermes runtime state
+state.db*
+*.sqlite
+*.sqlite3
+*.db
+
+logs/
+sessions/
+memories/
+deployments/
+releases/
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Python virtual environments
+venv/
+.venv/
+
+# Node (Hermes has optional Node bits)
+node_modules/
+
+# OS / editor scratch
+*.log
+*.bak
+*.tmp
+*.swp
+.DS_Store
