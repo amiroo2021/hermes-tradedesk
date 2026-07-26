@@ -11,7 +11,7 @@ import json
 import os
 import re
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
 try:  # pragma: no cover - exercised in gateway runtime
     from telegram import InlineKeyboardButton, InlineKeyboardMarkup
@@ -162,6 +162,54 @@ def _choice_keyboard(field: str, choices: List[Tuple[str, str]]) -> Any:
 
 def _preview_keyboard() -> Any:
     return _markup(_nav_rows(include_submit=True))
+
+
+def _final_view_keyboard() -> Any:
+    """Return the post-execute keyboard shown under read-only reports.
+
+    This keyboard is the standard for any final state that displays a
+    formatter result (balance, positions, open orders, etc.). The two
+    affordances are:
+
+      - **Back** (callback ``back``): pops the wizard's history stack
+        and re-renders the previous screen. For a freshly opened wizard
+        this returns to the root menu.
+      - **Raw** (callback ``raw``): switches the screen into the raw
+        debug view that prints the full JSON the agent returned. The raw
+        view is exchange-specific and exists for debugging only.
+      - **Cancel** (callback ``cancel``): clears state and returns to root.
+    """
+    rows = [
+        [("Back", _callback("back")), ("Raw", _callback("raw"))],
+        [("Cancel", _callback("cancel"))],
+    ]
+    return _markup(rows)
+
+
+def _raw_view_text(state: dict) -> str:
+    """Render the full exchange response for the raw debug view.
+
+    The exchange agent returns a dict with two layers of debug data:
+
+      - ``result["message"]`` — the formatted, exchange-agnostic
+        string the user normally sees (the standard rendering).
+      - ``result["data"]`` — the agent's full envelope, including
+        ``exchange_response`` (the agent's normalized response) and
+        ``raw_response`` (the exchange's raw bytes converted to a dict).
+        This is exchange-specific and exists for debugging only.
+
+    Both are included in the raw view so the operator can correlate
+    the formatted message with the underlying exchange payload.
+    """
+    raw = state.get("_final_raw_result")
+    if not isinstance(raw, Mapping):
+        return "Raw response unavailable."
+    # Truncate large nested payloads so the Telegram message stays readable.
+    formatted = json.dumps(raw, indent=2, ensure_ascii=False, default=str)
+    if len(formatted) > 3500:
+        # Telegram's hard limit is 4096 chars; keep a safety margin.
+        formatted = formatted[:3500] + "\n\n... (truncated; full payload in state['_final_raw_result'])"
+    return formatted
 
 
 def _positions_keyboard(positions: List[dict]) -> Any:
@@ -410,7 +458,11 @@ def _screen_for_state(state: dict, error: Optional[str] = None) -> Screen:
     if step == "preview":
         return Screen(_preview_text(state), _preview_keyboard())
     if step == "final_display":
-        return Screen(_final_display_text(state), None)
+        return Screen(_final_display_text(state), _final_view_keyboard())
+    if step == "raw_view":
+        # Raw debug view of the most recent execution result. The Back
+        # button pops the wizard history to the final_display screen.
+        return Screen(_raw_view_text(state), _final_view_keyboard())
     return Screen(prefix + "Trading Console\n\nChoose a workflow:", _root_keyboard())
 
 
@@ -1519,8 +1571,29 @@ async def handle_trade_callback(adapter: Any, query: Any, data: str) -> bool:
         return True
 
     if action == "submit":
-        await _edit(query, Screen(_execute_request_text(_build_request(state)), None))
-        states.pop(key, None)
+        # Capture the full result so the operator can later switch to the
+        # raw-response debug view via the "Raw" button. ``result`` is the
+        # exact dict returned by ``TradeDesk.execute`` — it includes both
+        # the formatted ``message`` (already exchange-agnostic) and the
+        # full ``data`` envelope with ``exchange_response`` and
+        # ``raw_response`` from the agent (debug payload, exchange-specific).
+        result = _execute_trade_request(_build_request(state))
+        state["_final_text"] = _render_trade_result(result)
+        state["_final_raw_result"] = result
+        state["step"] = "final_display"
+        await _edit(query, Screen(state["_final_text"], _final_view_keyboard()))
+        return True
+
+    if action == "raw":
+        # Render the raw response. The agent has already separated the
+        # formatted exchange-agnostic message (``result["message"]``)
+        # from the debug payload (``result["data"]["exchange_response"]``
+        # and ``result["data"]["raw_response"]``). The wizard reads
+        # these from ``state["_final_raw_result"]`` so we can navigate
+        # back to the formatted view without re-executing the request.
+        _push(state)
+        state["step"] = "raw_view"
+        await _edit(query, _screen_for_state(state))
         return True
 
     return True
