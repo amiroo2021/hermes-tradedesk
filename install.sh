@@ -104,12 +104,26 @@ if [[ ! -x "$HERMES_PY" ]]; then
 fi
 
 # ---------------------------------------------------------------------------
-# PHASE 1 — Validate BASE-HERMES structural contracts only.
+# PHASE 1 — Validate BASE-Hermes structural contracts only.
 #
-# These are things the BASE Hermes (not this package) must provide.
-# We deliberately do NOT check for: shared_selectors.py, _positions_render.py,
-# TradeDesk-specific Python deps, pycryptodome — these are package-provided
-# components that this installer itself installs in later phases.
+# The user-instructional contracts:
+#   - hermes_cli Python package importable (BASE Hermes ships this)
+#   - pip available in the Hermes venv (BASE Hermes ships this)
+#   - destination plugins/platforms/telegram/ directory exists and is
+#     writable (so we can copy our overlay there)
+#
+# We do NOT require:
+#   - plugins/__init__.py, plugins/platforms/__init__.py,
+#     plugins/platforms/telegram/__init__.py
+# These are NOT required by the actual import semantics: Python 3.3+ supports
+# PEP 420 implicit namespace packages, and `from plugins.platforms.telegram...
+# import ...` works whether or not those __init__.py files exist (as long
+# as the directories exist on PYTHONPATH and contain the .py modules we
+# ship).
+#
+# The previous installer required these __init__.py files; that was an
+# over-strict structural assumption that does not exist in real compatible
+# Hermes installations (e.g. Kamatera Hermes v0.19.0).
 # ---------------------------------------------------------------------------
 say ""
 say "Phase 1: validate base-Hermes structural contracts..."
@@ -155,14 +169,34 @@ else
     check_hermes_basic "pip available in Hermes venv" fail
 fi
 
-# Check: the Hermes plugins/ directory has __init__.py files (so
-# `from plugins.platforms.telegram...` works as a Python package).
-if [[ -f "$HERMES_HOME/plugins/__init__.py" ]] && \
-   [[ -f "$HERMES_HOME/plugins/platforms/__init__.py" ]] && \
-   [[ -f "$HERMES_HOME/plugins/platforms/telegram/__init__.py" ]]; then
-    check_hermes_basic "plugins/ has __init__.py files" ok
+# Check: the destination plugins/platforms/telegram/ directory exists and
+# is writable. We do NOT check for __init__.py (the actual import contract
+# is satisfied by PEP 420 namespace packages). We only need:
+#   1. The directory exists
+#   2. We can create files there
+# Note: this is the directory layout required by the wizard (which uses
+# `from plugins.platforms.telegram... import ...`).
+if [[ -d "$HERMES_HOME/plugins/platforms/telegram" ]]; then
+    # The directory exists. Check we can write to it.
+    test_file="$HERMES_HOME/plugins/platforms/telegram/.hermes-tradedesk-writable-test"
+    if ( : > "$test_file" ) 2>/dev/null; then
+        rm -f "$test_file"
+        check_hermes_basic "plugins/platforms/telegram/ is writable" ok
+    else
+        check_hermes_basic "plugins/platforms/telegram/ is writable" fail
+    fi
 else
-    check_hermes_basic "plugins/ has __init__.py files" fail
+    check_hermes_basic "plugins/platforms/telegram/ exists" fail
+fi
+
+# Check: we need a place for the tradedesk/ package. We install it under
+# $HERMES_HOME/tradesk/. Check that the parent directory is writable.
+test_file="$HERMES_HOME/.hermes-tradedesk-writable-test"
+if ( : > "$test_file" ) 2>/dev/null; then
+    rm -f "$test_file"
+    check_hermes_basic "Hermes home directory is writable" ok
+else
+    check_hermes_basic "Hermes home directory is writable" fail
 fi
 
 # Final base-Hermes verdict.

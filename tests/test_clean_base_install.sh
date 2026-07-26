@@ -1,21 +1,31 @@
 #!/usr/bin/env bash
 # test_clean_base_install.sh — Regression test for clean-base Hermes install.
 #
-# This test simulates a GENUINELY CLEAN base Hermes (Kamatera-style):
-#   - No tradedesk/ directory
-#   - No shared_selectors.py
-#   - No _positions_render.py
-#   - No TradeDesk-specific exchange dependencies initially installed
+# This test simulates the ACTUAL Kamatera Hermes v0.19.0 layout. The
+# previous version created `__init__.py` files at every level of
+# plugins/ (mimicking the DigitalOcean layout), which HID a real defect:
+# Kamatera does NOT have those __init__.py files, so the previous
+# install.sh check `plugins/ has __init__.py files` failed on Kamatera.
 #
-# The test creates a CLEAN fake-Hermes tree under /tmp, then:
-#   1. Calls install.sh with HERMES_HOME pointed at the fake tree
-#   2. install.sh runs its 11 phases
-#   3. We verify post-install that all expected files are present
-#   4. We verify post-install that imports succeed
+# The actual contract is:
+#   - The destination plugins/platforms/telegram/ directory exists and
+#     is writable.
+#   - hermes_cli is importable.
+#   - pip is available in the Hermes venv.
 #
-# To avoid network during pip install, we pre-seed the production hermes
-# venv (which already has the required packages) and use it via a
-# symlink-wrapper Python.
+# We test that install.sh completes successfully against a Kamatera-faithful
+# layout (NO __init__.py files under plugins/), bootstrapping the entire
+# package including:
+#   - pip dependencies
+#   - tradedesk/ modules
+#   - shared_selectors.py, _positions_render.py
+#   - trade_menu/ (wizard.py, __init__.py)
+#
+# Strategy for testing pip install without network:
+#   We pre-seed the production hermes venv (which already has the required
+#   packages installed) by using a symlink-wrapper Python. The install.sh
+#   does `pip install -r requirements.txt` which will detect that all
+#   packages are already at the pinned versions and skip the install.
 # -----------------------------------------------------------------------------
 set -uo pipefail
 
@@ -35,17 +45,21 @@ if [[ ! -f "$REQUIREMENTS" ]]; then
     exit 1
 fi
 
-# Build a CLEAN base-Hermes tree (Kamatera-style).
+# Build a CLEAN base-Hermes tree that MIRRORS the actual Kamatera
+# Hermes v0.19.0 layout. Specifically:
+#   - NO __init__.py files under plugins/ (PEP 420 namespace package).
+#   - Just the bare directory tree.
 CLEAN_FAKE="/tmp/test-clean-base-$$"
 mkdir -p "$CLEAN_FAKE"
 
-# We need the python wrapper to resolve requirements.txt and manifest.json
-# from the PUBLIC PACKAGE (since the test's $CLEAN_FAKE doesn't have them).
-# Solution: pre-copy requirements.txt and manifest.json to $CLEAN_FAKE so
-# install.sh finds them at $SCRIPT_DIR/requirements.txt.
+# The install.sh will look for requirements.txt and manifest.json at
+# $SCRIPT_DIR (which is $CLEAN_FAKE since we copy install.sh there). We
+# pre-copy the public-package versions.
 cp "$REQUIREMENTS" "$CLEAN_FAKE/requirements.txt"
 cp "$PUB_DIR/manifest.json" "$CLEAN_FAKE/manifest.json"
 
+# venv wrapper pointing at the production hermes venv (which has all
+# the production-time packages installed).
 hermes_py="/usr/local/lib/hermes-agent/venv/bin/python"
 mkdir -p "$CLEAN_FAKE/venv/bin"
 cat > "$CLEAN_FAKE/venv/bin/python" <<EOF
@@ -54,15 +68,16 @@ exec $hermes_py "\$@"
 EOF
 chmod +x "$CLEAN_FAKE/venv/bin/python"
 
-# Base Hermes structure (no TradeDesk, no shared_selectors, no _positions_render).
-mkdir -p "$CLEAN_FAKE/plugins"
-echo "" > "$CLEAN_FAKE/plugins/__init__.py"
-mkdir -p "$CLEAN_FAKE/plugins/platforms"
-echo "" > "$CLEAN_FAKE/plugins/platforms/__init__.py"
+# Base Hermes layout: NO __init__.py anywhere. This is the Kamatera-faithful
+# layout. (Production DigitalOcean has __init__.py at every level; the
+# previous installer incorrectly assumed that layout.)
 mkdir -p "$CLEAN_FAKE/plugins/platforms/telegram"
-echo "" > "$CLEAN_FAKE/plugins/platforms/telegram/__init__.py"
+# Do NOT create __init__.py files. This is the whole point of this test:
+# verify the install works without them.
 
-# Fake hermes_cli package.
+# Fake hermes_cli package (BASE Hermes ships this; we just need a placeholder
+# for the importability check). Use a real __init__.py here since this is
+# the top-level hermes_cli module, not plugins/.
 mkdir -p "$CLEAN_FAKE/hermes_cli"
 cat > "$CLEAN_FAKE/hermes_cli/__init__.py" <<EOF
 __version__ = "test-clean-base"
@@ -76,17 +91,15 @@ echo "fake hermes"
 EOF
 chmod +x "$CLEAN_FAKE/bin/hermes"
 
-# Copy install.sh to CLEAN_FAKE (so SCRIPT_DIR resolves there and finds
-# requirements.txt/manifest.json).
+# Copy install.sh to CLEAN_FAKE so $SCRIPT_DIR resolves there and finds
+# requirements.txt/manifest.json.
 cp "$INSTALL_SH" "$CLEAN_FAKE/install.sh"
 chmod +x "$CLEAN_FAKE/install.sh"
 
-# Run install.sh.  install.sh uses $SCRIPT_DIR for requirements.txt and
-# manifest.json, which now resolves to $CLEAN_FAKE. The source files for
-# tradedesk/ and hermes_overlay/ come from $PUB_DIR via HERMES_TRADESK_SRC_ROOT.
-echo "=== Running install.sh against clean base-Hermes fixture ==="
+# Run install.sh.
+echo "=== Running install.sh against Kamatera-faithful clean-base Hermes ==="
 echo "  CLEAN_FAKE=$CLEAN_FAKE"
-echo "  PUB_DIR=$PUB_DIR"
+echo "  layout: NO __init__.py files in plugins/ (PEP 420 namespace package)"
 echo
 
 HERMES_PY="$CLEAN_FAKE/venv/bin/python" \
@@ -137,7 +150,7 @@ done
 echo
 
 # Run the post-install integration import check.
-echo "=== Post-install: integration import check ==="
+echo "=== Post-install: integration import check (real Kamatera-faithful layout) ==="
 PYTHONPATH="$CLEAN_FAKE" "$hermes_py" -c "
 import importlib
 mods = [

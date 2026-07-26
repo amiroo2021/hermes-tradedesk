@@ -35,11 +35,19 @@ INSTALL_SH = PUB / "install.sh"
 
 
 def make_fake_hermes(name: str, *, missing_selectors=False, missing_positions_render=False,
-                     missing_symbols=None, extra_python_deps=True) -> Path:
+                     missing_symbols=None, with_init_files=True) -> Path:
     """Build a disposable fake Hermes root under /tmp/fake-hermes-<name>/.
 
     Returns the path to the fake Hermes root (which has a venv/bin/python,
     a hermes_cli/ package, plugins/platforms/telegram/...).
+
+    with_init_files: if True (DigitalOcean-style), pre-create __init__.py
+    at every level of plugins/. If False (Kamatera-style), do NOT create
+    __init__.py under plugins/ — the install must work with PEP 420
+    namespace packages.
+
+    The current tests should use the Kamatera-faithful layout (no
+    __init__.py files) since that's the actual compatible Hermes layout.
     """
     fake = Path(f"/tmp/fake-hermes-{name}")
     if fake.exists():
@@ -68,9 +76,14 @@ def make_fake_hermes(name: str, *, missing_selectors=False, missing_positions_re
     # Fake plugins/platforms/telegram/.
     plugins = fake / "plugins" / "platforms" / "telegram"
     plugins.mkdir(parents=True)
-    (fake / "plugins" / "__init__.py").write_text("")
-    (fake / "plugins" / "platforms" / "__init__.py").write_text("")
-    (fake / "plugins" / "platforms" / "telegram" / "__init__.py").write_text("")
+
+    if with_init_files:
+        # DigitalOcean-style: create __init__.py at every level.
+        (fake / "plugins" / "__init__.py").write_text("")
+        (fake / "plugins" / "platforms" / "__init__.py").write_text("")
+        (fake / "plugins" / "platforms" / "telegram" / "__init__.py").write_text("")
+    # else: Kamatera-style: NO __init__.py anywhere in plugins/.
+    # Python's PEP 420 namespace package support means imports still work.
 
     if not missing_selectors:
         selectors = plugins / "shared_selectors.py"
@@ -125,26 +138,20 @@ def run_install_sh(fake: Path) -> int:
 
 
 def test_A_exact_reference_layout():
-    """A. Exact known reference Hermes layout (with shared_selectors
-    pre-existing). Should be a partial mismatch with the new install.sh
-    semantics: the wizard shared_selectors check is no longer required
-    pre-install, so even WITHOUT shared_selectors the install should
-    succeed because the installer provides them. We test that the install
-    succeeds in this case.
-    """
-    fake = make_fake_hermes("A", extra_python_deps=True)
+    """A. Kamatera-faithful reference Hermes layout (no __init__.py
+    under plugins/). Should ACCEPT because PEP 420 namespace package
+    makes the layout work."""
+    fake = make_fake_hermes("A", with_init_files=False)
     rc = run_install_sh(fake)
-    # Cleanup: remove anything the test wrote to /tmp.
     shutil.rmtree(fake, ignore_errors=True)
     print(f"  [A] exit code: {rc}")
-    # The new install.sh should SUCCEED because it provides shared_selectors itself.
-    assert rc == 0, f"A should ACCEPT (installer provides missing components), got rc={rc}"
+    assert rc == 0, f"A should ACCEPT (Kamatera-faithful layout), got rc={rc}"
 
 
 def test_B_different_commit_same_layout():
-    """B. Different commit but structurally compatible Hermes layout. Should
+    """B. Different commit but same Kamatera-faithful layout. Should
     ACCEPT for the same reason as A."""
-    fake = make_fake_hermes("B", extra_python_deps=True)
+    fake = make_fake_hermes("B", with_init_files=False)
     rc = run_install_sh(fake)
     shutil.rmtree(fake, ignore_errors=True)
     print(f"  [B] exit code: {rc}")
@@ -152,36 +159,36 @@ def test_B_different_commit_same_layout():
 
 
 def test_C_incompatible_telegram_layout():
-    """C. Incompatible Telegram integration layout. In the NEW design, the
-    install sh does NOT require shared_selectors pre-existing. So this
-    scenario should now ACCEPT (install will create the missing files).
-    Therefore this test is marked as EXPECTED-PASS in the new flow."""
-    fake = make_fake_hermes("C", missing_selectors=True, missing_symbols=["account_keyboard"])
+    """C. Missing the destination directory (plugins/platforms/telegram/
+    doesn't exist at all). The install must still be able to bootstrap
+    by creating the directory itself, OR refuse with a clear error.
+
+    For now, we test the actual contract: the directory must exist (we
+    can create it). The install refuses when the directory is missing.
+    """
+    fake = make_fake_hermes("C", with_init_files=False)
+    # Remove the telegram/ directory tree completely.
+    shutil.rmtree(fake / "plugins" / "platforms" / "telegram")
     rc = run_install_sh(fake)
     shutil.rmtree(fake, ignore_errors=True)
     print(f"  [C] exit code: {rc}")
-    # The new install.sh does NOT require shared_selectors pre-existing.
-    assert rc == 0, f"C should now ACCEPT (install provides components), got rc={rc}"
+    # The install refuses because the destination directory doesn't exist
+    # and we don't auto-create it. (The operator can manually mkdir.)
+    assert rc != 0, f"C should REFUSE (no destination dir), got rc={rc}"
 
 
 def test_D_missing_integration_anchor():
-    """D. Missing required Hermes integration anchor. In the NEW design,
-    the only BASE-Hermes anchors are: hermes_cli importable, pip available,
-    plugins/ has __init__.py. If those are missing, install refuses.
-    We test by NOT creating the plugins/ __init__.py files.
-    """
-    fake = make_fake_hermes("D", missing_selectors=True, missing_positions_render=True)
-    # Remove the plugins/ __init__.py files to make base-Hermes structural
-    # check fail.
-    for sub in ["plugins/__init__.py", "plugins/platforms/__init__.py",
-                "plugins/platforms/telegram/__init__.py"]:
-        path = fake / sub
-        if path.exists():
-            path.unlink()
+    """D. Missing required BASE-Hermes integration anchor. The only
+    required anchors now are: hermes_cli importable, pip available, the
+    destination directory exists and is writable. We test by removing
+    the plugins/ tree entirely."""
+    fake = make_fake_hermes("D", with_init_files=False)
+    # Remove the entire plugins/ tree.
+    shutil.rmtree(fake / "plugins")
     rc = run_install_sh(fake)
     shutil.rmtree(fake, ignore_errors=True)
     print(f"  [D] exit code: {rc}")
-    assert rc != 0, f"D should REFUSE, got rc={rc}"
+    assert rc != 0, f"D should REFUSE (no destination dir), got rc={rc}"
 
 
 def test_E_existing_env_preserved():
@@ -209,7 +216,7 @@ def test_G_repeated_install_idempotent():
     always backs up before overwriting, so re-runs are safe. The first
     run installs files; the second run backs them up before overwriting.
     Both should succeed."""
-    fake = make_fake_hermes("G")
+    fake = make_fake_hermes("G", with_init_files=False)
     rc1 = run_install_sh(fake)
     rc2 = run_install_sh(fake)
     shutil.rmtree(fake, ignore_errors=True)
@@ -239,16 +246,39 @@ def test_H_no_network_actions():
     print(f"  [H] PASS: install.sh + verify.sh contain no live exchange POSTs")
 
 
+def test_I_kamatera_faithful_layout():
+    """I. EXPLICITLY test the Kamatera-faithful layout (no __init__.py
+    files anywhere in plugins/). The install must work because Python
+    supports PEP 420 implicit namespace packages."""
+    fake = make_fake_hermes("I_kamatera", with_init_files=False)
+    rc = run_install_sh(fake)
+    shutil.rmtree(fake, ignore_errors=True)
+    print(f"  [I] exit code: {rc}")
+    assert rc == 0, f"I should ACCEPT (PEP 420 namespace package works), got rc={rc}"
+
+
+def test_J_digital_ocean_layout():
+    """J. The DigitalOcean layout (with __init__.py files) should ALSO
+    still work — we don't break DigitalOcean by fixing Kamatera."""
+    fake = make_fake_hermes("J_digitalocean", with_init_files=True)
+    rc = run_install_sh(fake)
+    shutil.rmtree(fake, ignore_errors=True)
+    print(f"  [J] exit code: {rc}")
+    assert rc == 0, f"J should ACCEPT (DigitalOcean layout), got rc={rc}"
+
+
 def main():
     tests = [
-        ("A. exact reference layout → ACCEPT", test_A_exact_reference_layout),
-        ("B. different commit, same layout → ACCEPT", test_B_different_commit_same_layout),
-        ("C. missing symbols (pre-existing) → ACCEPT (install provides)", test_C_incompatible_telegram_layout),
-        ("D. missing base-Hermes integration anchor → REFUSE", test_D_missing_integration_anchor),
+        ("A. Kamatera-faithful layout → ACCEPT", test_A_exact_reference_layout),
+        ("B. Different commit, same layout → ACCEPT", test_B_different_commit_same_layout),
+        ("C. Missing destination directory → REFUSE", test_C_incompatible_telegram_layout),
+        ("D. Missing base-Hermes integration anchor → REFUSE", test_D_missing_integration_anchor),
         ("E. existing ~/.hermes/.env → PRESERVED", test_E_existing_env_preserved),
         ("F. existing ~/.hermes/auth.json → PRESERVED", test_F_existing_auth_preserved),
         ("G. repeated installation → idempotent", test_G_repeated_install_idempotent),
         ("H. no network actions during install/verify", test_H_no_network_actions),
+        ("I. Kamatera-faithful layout (no __init__.py) → ACCEPT", test_I_kamatera_faithful_layout),
+        ("J. DigitalOcean layout (with __init__.py) → still ACCEPT", test_J_digital_ocean_layout),
     ]
     passed = 0
     failed = 0
