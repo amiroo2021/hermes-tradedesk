@@ -363,14 +363,106 @@ class AfxAgent:
             raw = self.info_client.get_wallet(wallet, include_zero=False)
         else:
             raw = self._get_json("/info/account/wallet", {"userAddr": wallet, "includeZero": "false"})
+        # Normalize the AFx wallet response so the trade-menu balance
+        # renderer can extract the standard fields. The raw AFx response
+        # is {"code": 0, "data": [{...wallet fields...}]}. We extract
+        # the first wallet and build a normalized envelope that matches
+        # the renderer's expected field names.
+        normalized = self._normalize_afx_balance(raw)
         return _execution_result(
             request,
             success=True,
             credential_variables=credential_context,
-            exchange_response=raw,
+            exchange_response=normalized,
             raw_response=raw,
-            wallets=(raw.get("data") if isinstance(raw, Mapping) else raw),
+            wallets=(normalized.get("data") if isinstance(normalized, Mapping) else raw.get("data") if isinstance(raw.get("data"), list) else raw),
         )
+
+    @staticmethod
+    def _normalize_afx_balance(raw: Mapping[str, Any]) -> dict:
+        """Normalize an AFx /info/account/wallet response.
+
+        The raw AFx response is structured as
+        ``{"code": 0, "message": "success", "data": [<wallet>]}`` where each
+        ``<wallet>`` has fields like ``balance`` (USDC equity), ``equity``
+        (mark-to-market total equity), ``availableBalance`` (withdrawable),
+        etc. The trade-menu ``_format_balance_message`` reads a
+        ``marginSummary`` block with ``accountValue``, ``totalMarginUsed``,
+        ``totalNtlPos`` plus top-level fallbacks ``accountValue`` and
+        ``withdrawable``. Without normalization the AFx response only has
+        the raw list under ``data`` and the renderer shows
+        "Balance unavailable." for every field.
+
+        This helper produces a normalized envelope:
+            - keeps the original ``code``/``message``/``data`` for
+              backwards compatibility,
+            - adds a top-level ``accountValue`` (from ``equity``),
+              ``withdrawable`` (from ``availableBalance``),
+            - adds a ``marginSummary`` block with the standard fields,
+            - adds a flat ``balance`` mapping with the same keys,
+            - adds a ``totalPositionValue`` field.
+        """
+        out: dict = dict(raw) if isinstance(raw, Mapping) else {}
+        data_field = raw.get("data") if isinstance(raw, Mapping) else None
+        wallet: dict = {}
+        if isinstance(data_field, list) and data_field:
+            first = data_field[0]
+            if isinstance(first, Mapping):
+                wallet = dict(first)
+        elif isinstance(data_field, Mapping):
+            wallet = dict(data_field)
+        if not wallet:
+            # No data — return the original raw as-is.
+            return out
+        # Extract standard fields.
+        equity = wallet.get("equity")
+        balance = wallet.get("balance")
+        available_balance = wallet.get("availableBalance")
+        # AFx doesn't expose position value directly; best approximation
+        # is ``equity - availableBalance`` (the value currently locked in
+        # positions). If negative, treat as 0.
+        if isinstance(equity, (int, float)) and isinstance(available_balance, (int, float)):
+            total_position_value = max(Decimal(0), Decimal(str(equity)) - Decimal(str(available_balance)))
+        else:
+            total_position_value = None
+        # Margin used = equity - availableBalance (the same as position
+        # value, since AFx is fully cross-margin).
+        margin_used = total_position_value
+        # Build the normalized envelope.
+        normalized: dict = dict(out)
+        # Top-level fallbacks for the renderer.
+        if equity is not None:
+            normalized["accountValue"] = equity
+            normalized["account_value"] = equity
+        if available_balance is not None:
+            normalized["withdrawable"] = available_balance
+            normalized["withdrawableUsd"] = available_balance
+            normalized["availableToWithdraw"] = available_balance
+        if balance is not None:
+            normalized["balance_amount"] = balance
+        if total_position_value is not None:
+            normalized["totalPositionValue"] = float(total_position_value)
+            normalized["total_position_value"] = float(total_position_value)
+        # Standard marginSummary for the renderer.
+        margin_summary: dict = {
+            "accountValue": equity,
+            "totalMarginUsed": float(margin_used) if margin_used is not None else None,
+            "totalNtlPos": float(total_position_value) if total_position_value is not None else None,
+        }
+        normalized["marginSummary"] = margin_summary
+        normalized["crossMarginSummary"] = dict(margin_summary)
+        # Flat balance object.
+        flat_balance: dict = {
+            "account_value": equity,
+            "account_equity": equity,
+            "withdrawable": available_balance,
+            "available_to_withdraw": available_balance,
+            "balance": balance,
+            "margin_used": float(margin_used) if margin_used is not None else None,
+            "total_position_value": float(total_position_value) if total_position_value is not None else None,
+        }
+        normalized["balance"] = flat_balance
+        return normalized
 
     def _open_orders(self, request: Mapping[str, Any]) -> dict:
         wallet, credential_context, error = self._require_wallet(request)

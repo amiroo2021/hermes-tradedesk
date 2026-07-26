@@ -46,6 +46,13 @@ requests==2.33.0
 hyperliquid-python-sdk==0.24.0
 apexomni==3.3.1
 
+# Numerical library (transitive; pinned for reproducibility)
+# apexomni==3.3.1 does 'import numpy as np' at module level in
+# http_private_sign.py, so numpy is REQUIRED for the [Apex] balance
+# to work. Without numpy, the Apex _balance call raises
+# 'ModuleNotFoundError: No module named "numpy"'.
+numpy==2.4.6
+
 # Telegram bot framework. Compatible with hermes-agent 0.19.0.
 python-telegram-bot==22.6
 
