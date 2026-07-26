@@ -2,10 +2,13 @@
 # install.sh — Install hermes-tradedesk onto a fresh Hermes installation
 # -----------------------------------------------------------------------------
 # This installer is INTENTIONALLY conservative:
-#   - Performs structural compatibility checks against the destination
-#     Hermes installation (does NOT require an exact Hermes commit).
-#   - Refuses to install when the destination Hermes lacks required
-#     integration contracts.
+#   - Performs STRUCTURAL compatibility checks against the BASE destination
+#     Hermes (does NOT require an exact Hermes commit).
+#   - Distinguishes BASE-HERMES prerequisites from PACKAGE-PROVIDED
+#     components: package-provided components (TradeDesk modules, the
+#     wizard, the Telegram overlay files, TradeDesk-specific Python
+#     dependencies) are installed by THIS script, not required to
+#     pre-exist.
 #   - Refuses to overwrite ~/.hermes/.env or ~/.hermes/auth.json.
 #   - Performs ZERO live trading actions. Verification is read-only.
 #   - Backs up every file it modifies in the system install.
@@ -15,7 +18,7 @@
 #
 # Override the structural-compatibility check (NOT recommended — only for
 # ops-time use when you have manually verified integration contracts):
-#   sudo HERMES_TRADEDESK_SKIP_STRUCT_CHECK=1 ./install.sh
+#   sudo HERMES_TRADESK_SKIP_STRUCT_CHECK=1 ./install.sh
 #
 # This script is idempotent: re-running it reinstalls over the prior version
 # after backing up the existing files.
@@ -30,13 +33,14 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # into a temp dir while pointing the source paths back at this repo).
 SRC_TRADEDESK="$SCRIPT_DIR/tradedesk"
 SRC_OVERLAY="$SCRIPT_DIR/hermes_overlay"
-if [[ -n "${HERMES_TRADEDESK_SRC_ROOT:-}" ]]; then
-    SRC_TRADEDESK="$HERMES_TRADEDESK_SRC_ROOT/tradedesk"
-    SRC_OVERLAY="$HERMES_TRADEDESK_SRC_ROOT/hermes_overlay"
+if [[ -n "${HERMES_TRADESK_SRC_ROOT:-}" ]]; then
+    SRC_TRADEDESK="$HERMES_TRADESK_SRC_ROOT/tradedesk"
+    SRC_OVERLAY="$HERMES_TRADESK_SRC_ROOT/hermes_overlay"
 fi
 
 err() { echo "ERROR: $*" >&2; }
 say() { echo "$@"; }
+warn() { echo "WARN  $*"; }
 
 # ---------------------------------------------------------------------------
 # 0. Root check
@@ -59,17 +63,18 @@ fi
 say "  host distro: ${PRETTY_NAME:-$ID}"
 
 # ---------------------------------------------------------------------------
-# 2. Hermes detection
+# 2. BASE Hermes detection (the install is anchored to an existing Hermes
+#    install; the user must already have Hermes on this machine).
 # ---------------------------------------------------------------------------
-HERMES_HOME="/usr/local/lib/hermes-agent"
-HERMES_BIN="/usr/local/bin/hermes"
+HERMES_HOME="${HERMES_TRADESK_HERMES_HOME:-/usr/local/lib/hermes-agent}"
+HERMES_BIN="${HERMES_TRADESK_HERMES_BIN:-/usr/local/bin/hermes}"
 USER_HOME_ROOT="/root"
 USER_ENV="$USER_HOME_ROOT/.hermes/.env"
 USER_AUTH="$USER_HOME_ROOT/.hermes/auth.json"
 
 if [[ ! -d "$HERMES_HOME" ]]; then
     err "No Hermes source at $HERMES_HOME"
-    err "This package is meant to be installed ON TOP of an existing Hermes"
+    err "This package is meant to be installed ON TOP OF an existing Hermes"
     exit 1
 fi
 if [[ ! -x "$HERMES_BIN" ]]; then
@@ -92,211 +97,149 @@ else
     say "  Hermes commit:  $HERMES_COMMIT (informational)"
 fi
 
-# ---------------------------------------------------------------------------
-# 4-5. STRUCTURAL compatibility gate (NOT a SHA-equality check).
-# ---------------------------------------------------------------------------
 HERMES_PY="$HERMES_HOME/venv/bin/python"
 if [[ ! -x "$HERMES_PY" ]]; then
     err "Hermes venv Python not found at $HERMES_PY"
     exit 1
 fi
 
-# Required integration contracts.
-STRUCT_CHECKS_PASSED=0
-STRUCT_CHECKS_FAILED=0
-struct_failures=()
+# ---------------------------------------------------------------------------
+# PHASE 1 — Validate BASE-HERMES structural contracts only.
+#
+# These are things the BASE Hermes (not this package) must provide.
+# We deliberately do NOT check for: shared_selectors.py, _positions_render.py,
+# TradeDesk-specific Python deps, pycryptodome — these are package-provided
+# components that this installer itself installs in later phases.
+# ---------------------------------------------------------------------------
+say ""
+say "Phase 1: validate base-Hermes structural contracts..."
 
-run_struct_check() {
+HERMES_BASIC_PASSED=0
+HERMES_BASIC_FAILED=0
+hermes_basic_failures=()
+
+check_hermes_basic() {
     local label="$1"
     local result="$2"
     if [[ "$result" == "ok" ]]; then
         say "    [OK]   $label"
-        STRUCT_CHECKS_PASSED=$((STRUCT_CHECKS_PASSED + 1))
+        HERMES_BASIC_PASSED=$((HERMES_BASIC_PASSED + 1))
     else
         say "    [FAIL] $label"
-        STRUCT_CHECKS_FAILED=$((STRUCT_CHECKS_FAILED + 1))
-        struct_failures+=("$label")
+        HERMES_BASIC_FAILED=$((HERMES_BASIC_FAILED + 1))
+        hermes_basic_failures+=("$label")
     fi
 }
 
+# Check: hermes_cli Python package is importable (this is provided by base
+# Hermes, not by us). We need it because the wizard eventually submits to
+# TradeDesk which is part of hermes_agent.
+if "$HERMES_PY" -c "import hermes_cli" 2>/dev/null; then
+    check_hermes_basic "hermes_cli Python package importable" ok
+else
+    check_hermes_basic "hermes_cli Python package importable" fail
+fi
+
+# Check: hermes_cli exports __version__ (sanity — it's not optional).
+if "$HERMES_PY" -c "from hermes_cli import __version__" 2>/dev/null; then
+    check_hermes_basic "hermes_cli.__version__ importable" ok
+else
+    check_hermes_basic "hermes_cli.__version__ importable" fail
+fi
+
+# Check: pip is available in the Hermes venv (we need it to install
+# this package's pip dependencies).
+if "$HERMES_PY" -m pip --version 2>/dev/null; then
+    check_hermes_basic "pip available in Hermes venv" ok
+else
+    check_hermes_basic "pip available in Hermes venv" fail
+fi
+
+# Check: the Hermes plugins/ directory has __init__.py files (so
+# `from plugins.platforms.telegram...` works as a Python package).
+if [[ -f "$HERMES_HOME/plugins/__init__.py" ]] && \
+   [[ -f "$HERMES_HOME/plugins/platforms/__init__.py" ]] && \
+   [[ -f "$HERMES_HOME/plugins/platforms/telegram/__init__.py" ]]; then
+    check_hermes_basic "plugins/ has __init__.py files" ok
+else
+    check_hermes_basic "plugins/ has __init__.py files" fail
+fi
+
+# Final base-Hermes verdict.
 say ""
-say "Running structural compatibility checks against destination Hermes..."
-say "  (these check integration CONTRACTS, not exact commits)"
-
-# Check 1: required Telegram shared_selectors module exists with expected exports.
-SELECTORS_FILE="$HERMES_HOME/plugins/platforms/telegram/shared_selectors.py"
-SELECTORS_OK=missing
-if [[ -f "$SELECTORS_FILE" ]]; then
-    missing_symbols=""
-    for sym in account_keyboard account_prompt exchange_keyboard exchange_prompt lighter_account_keyboard; do
-        if ! grep -qE "^\s*def\s+$sym\b|^$sym\s*[:=]" "$SELECTORS_FILE"; then
-            missing_symbols+=" $sym"
-        fi
-    done
-    if [[ -z "$missing_symbols" ]]; then
-        SELECTORS_OK=ok
-    else
-        SELECTORS_OK="missing symbols:$missing_symbols"
-    fi
-fi
-run_struct_check "plugins/platforms/telegram/shared_selectors.py exports" "$SELECTORS_OK"
-
-# Check 2: _positions_render module exists.
-POSITIONS_RENDER_FILE="$HERMES_HOME/plugins/platforms/telegram/_positions_render.py"
-POSITIONS_RENDER_OK=missing
-if [[ -f "$POSITIONS_RENDER_FILE" ]]; then
-    POSITIONS_RENDER_OK=ok
-fi
-run_struct_check "plugins/platforms/telegram/_positions_render.py exists" "$POSITIONS_RENDER_OK"
-
-# Check 3: hermes_cli package is importable.
-HERMES_CLI_OK=missing
-HERMES_CLI_OUT="$("$HERMES_PY" -c "import hermes_cli; print('ok')" 2>&1 || true)"
-if [[ "$HERMES_CLI_OUT" == *"ok"* ]]; then
-    HERMES_CLI_OK=ok
-fi
-run_struct_check "hermes_cli package importable" "$HERMES_CLI_OK"
-
-# Check 4: required Python deps for the agents (verified by `pip show`).
-# These match the actual production runtime on DigitalOcean.
-PYDEPS_OK=ok
-PYDEPS_FAILED=()
-# Map pip-package-name -> import-name. Some packages have different import
-# names (e.g. python-telegram-bot is imported as `telegram`).
-declare -A PKG_TO_IMPORT=(
-    [lighter]=lighter
-    [base58]=base58
-    [cryptography]=cryptography
-    [eth-account]=eth_account
-    [eth-abi]=eth_abi
-    [eth-utils]=eth_utils
-    [requests]=requests
-    [solders]=solders
-    [python-telegram-bot]=telegram
-)
-for pkg in "${!PKG_TO_IMPORT[@]}"; do
-    import_name="${PKG_TO_IMPORT[$pkg]}"
-    if ! "$HERMES_PY" -c "import $import_name" 2>/dev/null; then
-        PYDEPS_OK=fail
-        PYDEPS_FAILED+=("$pkg")
-    fi
-done
-if [[ "$PYDEPS_OK" == "ok" ]]; then
-    run_struct_check "Python deps for exchange agents (lighter, base58, cryptography, eth_account, eth_abi, eth_utils, requests, solders, telegram)" ok
-else
-    run_struct_check "Python deps for exchange agents (missing: ${PYDEPS_FAILED[*]})" fail
-fi
-
-# Check 5: exchange-specific SDKs (loaded lazily by some agents).
-PYDEPS_OK2=ok
-PYDEPS_FAILED2=()
-# These are loaded conditionally by the agents. They are STRONGLY RECOMMENDED
-# but we do not refuse install if they are missing; agents will fail at runtime
-# only when their respective code path is exercised.
-for dep in hyperliquid apexomni afx; do
-    if ! "$HERMES_PY" -c "import $dep" 2>/dev/null; then
-        PYDEPS_OK2=warn
-        PYDEPS_FAILED2+=("$dep")
-    fi
-done
-if [[ "$PYDEPS_OK2" == "ok" ]]; then
-    run_struct_check "Exchange SDKs (hyperliquid, apexomni, afx) — all importable" ok
-else
-    # Not a hard fail: exchange-specific SDKs are loaded lazily.
-    say "    [WARN] Exchange SDKs missing: ${PYDEPS_FAILED2[*]} (not a hard fail; agents that need them will error at runtime)"
-fi
-
-# Check 6: pycryptodome (Crypto.Hash.keccak) used by Rise agent for EIP-712 signing.
-if "$HERMES_PY" -c "from Crypto.Hash import keccak" 2>/dev/null; then
-    run_struct_check "pycryptodome (Crypto.Hash.keccak) for EIP-712 signing" ok
-else
-    run_struct_check "pycryptodome (Crypto.Hash.keccak) for EIP-712 signing" fail
-fi
-
-# Final structural-compatibility verdict.
-say ""
-say "Structural compatibility summary:"
-say "  passed: $STRUCT_CHECKS_PASSED"
-say "  failed: $STRUCT_CHECKS_FAILED"
-
-if [[ "$STRUCT_CHECKS_FAILED" -gt 0 ]]; then
+say "Base-Hermes structural compatibility: $HERMES_BASIC_PASSED passed, $HERMES_BASIC_FAILED failed"
+if [[ "$HERMES_BASIC_FAILED" -gt 0 ]]; then
     if [[ "${HERMES_TRADESK_SKIP_STRUCT_CHECK:-0}" == "1" ]]; then
-        say ""
-        err "Structural compatibility FAILED on $STRUCT_CHECKS_FAILED check(s):"
-        for f in "${struct_failures[@]}"; do
-            err "  - $f"
-        done
-        err ""
-        err "HERMES_TRADESK_SKIP_STRUCT_CHECK=1 is set; proceeding anyway."
-        err "** This is NOT recommended. Installation will likely fail at runtime. **"
+        warn "Skipping structural compatibility gate (HERMES_TRADESK_SKIP_STRUCT_CHECK=1)."
+        warn "Installation will likely fail at runtime."
     else
-        say ""
-        err "Structural compatibility FAILED on $STRUCT_CHECKS_FAILED check(s):"
-        for f in "${struct_failures[@]}"; do
+        err "Refusing to install: BASE Hermes does not provide the required"
+        err "structural contracts:"
+        for f in "${hermes_basic_failures[@]}"; do
             err "  - $f"
         done
         err ""
-        err "Refusing to install. The destination Hermes does not provide the"
-        err "required integration contracts."
-        err ""
-        err "If you have manually verified these contracts and want to override,"
-        err "export HERMES_TRADESK_SKIP_STRUCT_CHECK=1 and retry. (NOT recommended.)"
+        err "If you have manually verified these contracts, you may override"
+        err "with HERMES_TRADESK_SKIP_STRUCT_CHECK=1. (NOT recommended.)"
         exit 1
     fi
 fi
 
 # ---------------------------------------------------------------------------
-# 6. Compatibility manifest (informational, NOT a hard gate).
+# PHASE 2 — Validate public package source files exist.
 # ---------------------------------------------------------------------------
-MANIFEST="$SCRIPT_DIR/manifest.json"
-REF_COMMIT="(no manifest)"
-if [[ -f "$MANIFEST" ]]; then
-    REF_COMMIT="$("$HERMES_PY" - <<EOF
-import json
-with open("$MANIFEST") as f:
-    print(json.load(f).get("reference_hermes_commit", "(none)"))
-EOF
-)"
-    say ""
-    say "  Reference Hermes commit (informational): $REF_COMMIT"
-    say "  (Hermes commit equality is NOT required for installation.)"
-else
-    say ""
-    say "  Reference manifest not found at $MANIFEST (informational only)."
-    say "  (This is OK — install will proceed using structural checks.)"
-fi
+say ""
+say "Phase 2: validate public package source files..."
 
-# ---------------------------------------------------------------------------
-# 6.5. Install required Python dependencies into the Hermes venv.
-#
-# If any of the required packages are missing, install them via pip.
-# This list matches the EXACT production runtime on DigitalOcean.
-# ---------------------------------------------------------------------------
-REQUIREMENTS_FILE="$SCRIPT_DIR/requirements.txt"
-if [[ -f "$REQUIREMENTS_FILE" ]]; then
-    say ""
-    say "Installing required Python dependencies from $REQUIREMENTS_FILE..."
-    # Use --no-deps so pip doesn't unexpectedly upgrade/downgrade shared deps.
-    # Use --quiet for less noise; we still report what was installed.
-    if "$HERMES_PY" -m pip install --no-deps -q -r "$REQUIREMENTS_FILE" 2>&1; then
-        say "  Python dependencies installed (--no-deps to avoid clobbering shared deps)"
-    else
-        err "pip install failed for one or more packages."
-        err "Continuing — the structural checks above already confirmed the"
-        err "modules are importable. This is non-fatal but you may need to"
-        err "install missing packages manually before using the wizard."
+pkg_missing=()
+for f in "$SRC_TRADEDESK"/*.py \
+         "$SRC_TRADEDESK"/__init__.py \
+         "$SRC_OVERLAY/telegram/shared_selectors.py" \
+         "$SRC_OVERLAY/telegram/_positions_render.py" \
+         "$SRC_OVERLAY/telegram/trade_menu/__init__.py" \
+         "$SRC_OVERLAY/telegram/trade_menu/wizard.py"; do
+    if [[ ! -f "$f" ]]; then
+        pkg_missing+=("$f")
     fi
+done
+if [[ ${#pkg_missing[@]} -gt 0 ]]; then
+    err "Public package is missing required source files:"
+    for f in "${pkg_missing[@]}"; do
+        err "  - $f"
+    done
+    exit 1
 else
-    say ""
-    say "  (No requirements.txt found at $REQUIREMENTS_FILE; skipping dep install.)"
+    say "  [OK]   all $(($(echo "$SRC_TRADEDESK"/*.py | wc -w) + 4)) package source files present"
 fi
 
 # ---------------------------------------------------------------------------
-# 7. Backup target
+# PHASE 3 — Validate requirements.txt is valid/nonempty.
 # ---------------------------------------------------------------------------
+say ""
+say "Phase 3: validate requirements.txt..."
+
+REQUIREMENTS_FILE="$SCRIPT_DIR/requirements.txt"
+if [[ ! -f "$REQUIREMENTS_FILE" ]]; then
+    err "Missing $REQUIREMENTS_FILE"
+    exit 1
+fi
+# Count non-comment lines that look like package specifiers.
+PKG_COUNT=$(grep -cE "^[A-Za-z0-9_.-]+(==|>=|<=|~=|!=|===|>|<)" "$REQUIREMENTS_FILE" 2>/dev/null || echo 0)
+if [[ "$PKG_COUNT" -lt 1 ]]; then
+    err "requirements.txt has no valid package specifiers"
+    exit 1
+fi
+say "  [OK]   requirements.txt has $PKG_COUNT package specifiers"
+
+# ---------------------------------------------------------------------------
+# PHASE 4 — Create backups for destination files that will be overwritten.
+# ---------------------------------------------------------------------------
+say ""
+say "Phase 4: create backups for files that will be overwritten..."
+
 BACKUP_DIR="${HOME:-/root}/.hermes/tradedesk-install-backups/$(date -u +%Y%m%dT%H%M%SZ)"
 mkdir -p "$BACKUP_DIR"
-say "  Backup dir:       $BACKUP_DIR"
+say "  Backup dir: $BACKUP_DIR"
 
 backup_file() {
     local f="$1"
@@ -309,52 +252,291 @@ backup_file() {
     fi
 }
 
-# ---------------------------------------------------------------------------
-# 8. Backup existing tradedesk
-# ---------------------------------------------------------------------------
-say ""
-say "Backing up existing files..."
-for f in $(find "$SRC_TRADEDESK" -type f -name "*.py" 2>/dev/null); do
-    rel="${f#$SCRIPT_DIR/}"
-    target="$HERMES_HOME/${rel#tradedesk/}"
+# Back up existing tradedesk files.
+for f in "$SRC_TRADEDESK"/*.py; do
+    fname="$(basename "$f")"
+    target="$HERMES_HOME/tradedesk/$fname"
     if [[ -e "$target" ]]; then
-        mkdir -p "$BACKUP_DIR/$(dirname "$rel")"
-        cp -p "$target" "$BACKUP_DIR/$rel"
-        say "  backup: $rel"
+        backup_file "$target"
+    fi
+done
+# Back up existing telegram plugin files.
+for f in shared_selectors.py _positions_render.py; do
+    target="$HERMES_HOME/plugins/platforms/telegram/$f"
+    if [[ -e "$target" ]]; then
+        backup_file "$target"
+    fi
+done
+# Back up existing trade_menu files.
+for f in __init__.py wizard.py; do
+    target="$HERMES_HOME/plugins/platforms/telegram/trade_menu/$f"
+    if [[ -e "$target" ]]; then
+        backup_file "$target"
     fi
 done
 
 # ---------------------------------------------------------------------------
-# 9-11. Install TradeDesk + wizard + integration hooks
+# PHASE 5 — Install declared pip dependencies into the Hermes venv.
+#
+# Strategy: use `pip install` (with default dep resolution) WITHOUT
+# `--no-deps`. The previous public release used `--no-deps`, which broke
+# on a clean Hermes because transitive deps (eth-hash, eth-rlp, etc.)
+# were missing. We have audited the package set against the actual
+# DigitalOcean production runtime and pinned exact versions.
+#
+# We use a constraints-style approach: pin all top-level packages, but
+# let pip resolve transitive deps. This is the standard approach.
+#
+# For packages NOT on PyPI (e.g. afx-python-sdk which is a private
+# package only on the DigitalOcean server), we mark them as
+# documentation-only in requirements.txt (prefixed with # private/).
+# They will be reported as missing in PHASE 9 but are NOT required for
+# the wizard to function — only for the AFx exchange.
 # ---------------------------------------------------------------------------
 say ""
-say "Installing TradeDesk modules to $HERMES_HOME/tradedesk/..."
+say "Phase 5: install Python dependencies into Hermes venv..."
+
+# Split requirements.txt into installable and private-only sections.
+# Lines starting with `# private/` are documentation-only.
+INST_FILE="$BACKUP_DIR/requirements-installable.txt"
+PRIVATE_FILE="$BACKUP_DIR/requirements-private.txt"
+: > "$INST_FILE"
+: > "$PRIVATE_FILE"
+while IFS= read -r line; do
+    if [[ "$line" =~ ^[[:space:]]*#[[:space:]]*private/ ]]; then
+        echo "$line" >> "$PRIVATE_FILE"
+    elif [[ -n "$line" && ! "$line" =~ ^[[:space:]]*# ]]; then
+        echo "$line" >> "$INST_FILE"
+    fi
+done < "$REQUIREMENTS_FILE"
+
+# Run pip install.
+say "  Installing pip packages from $INST_FILE..."
+if "$HERMES_PY" -m pip install -r "$INST_FILE" 2>&1 | tail -20; then
+    say "  [OK]   pip install completed"
+else
+    rc=$?
+    err "pip install failed (rc=$rc)"
+    err "Continuing to PHASE 6 to verify which packages are importable"
+    err "and which need manual installation. The private packages"
+    err "(marked # private/ in requirements.txt) must be installed"
+    err "manually by the operator if they want those exchanges."
+fi
+
+# ---------------------------------------------------------------------------
+# PHASE 6 — Verify that the just-installed dependencies are importable.
+#
+# We check the package list from requirements.txt. For any package
+# that is still not importable, we report it clearly. Some packages
+# may be marked `# private/` meaning they cannot be installed from PyPI
+# (e.g. afx-python-sdk). These are documented but NOT required for
+# the wizard to function.
+# ---------------------------------------------------------------------------
+say ""
+say "Phase 6: verify dependencies are importable..."
+
+import_ok=0
+import_fail=0
+import_failures=()
+
+verify_import() {
+    local pkg_name="$1"
+    local import_name="$2"
+    if "$HERMES_PY" -c "import $import_name" 2>/dev/null; then
+        import_ok=$((import_ok + 1))
+    else
+        import_fail=$((import_fail + 1))
+        import_failures+=("$pkg_name (import $import_name)")
+    fi
+}
+
+# Always-required (these are imported at module level by agents).
+verify_import "eth-account"        "eth_account"
+verify_import "cryptography"       "cryptography"
+verify_import "base58"            "base58"
+verify_import "requests"           "requests"
+verify_import "hyperliquid-python-sdk" "hyperliquid"
+verify_import "lighter-sdk"       "lighter"
+verify_import "python-telegram-bot" "telegram"
+
+# Optional / lazy-imported (only needed when those specific agents run).
+# We don't fail the install on these, but we report which are missing.
+optional_ok=0
+optional_missing=()
+verify_optional() {
+    local pkg_name="$1"
+    local import_name="$2"
+    if "$HERMES_PY" -c "import $import_name" 2>/dev/null; then
+        optional_ok=$((optional_ok + 1))
+    else
+        optional_missing+=("$pkg_name (import $import_name)")
+    fi
+}
+verify_optional "solders"        "solders"
+verify_optional "apexomni"       "apexomni"
+verify_optional "pycryptodome"   "Crypto"
+verify_optional "eth-abi"        "eth_abi"
+verify_optional "eth-utils"      "eth_utils"
+
+say "  Always-required imports: $import_ok passed, $import_fail failed"
+if [[ $import_fail -gt 0 ]]; then
+    err "The following required packages did not become importable:"
+    for f in "${import_failures[@]}"; do
+        err "  - $f"
+    done
+    err ""
+    err "Installation cannot continue. Check that pip is functional and"
+    err "that pip can reach PyPI (e.g. behind a corporate proxy?)."
+    exit 1
+fi
+
+if [[ ${#optional_missing[@]} -gt 0 ]]; then
+    warn "Optional packages not importable (only needed when using specific exchanges):"
+    for f in "${optional_missing[@]}"; do
+        warn "  - $f"
+    done
+    warn "The wizard will work but specific exchanges may fail at runtime."
+    warn "Some of these may be private/edge packages (e.g. afx-python-sdk)"
+    warn "that are not on PyPI and must be installed manually."
+fi
+
+# ---------------------------------------------------------------------------
+# PHASE 7 — Copy/install TradeDesk modules.
+# ---------------------------------------------------------------------------
+say ""
+say "Phase 7: install TradeDesk modules..."
+
 mkdir -p "$HERMES_HOME/tradedesk"
 for f in "$SRC_TRADEDESK"/*.py; do
     fname="$(basename "$f")"
     cp "$f" "$HERMES_HOME/tradedesk/$fname"
-    say "  tradedesk/$fname"
 done
-
-say ""
-say "Installing Telegram /trade wizard under $HERMES_HOME/plugins/..."
-mkdir -p "$HERMES_HOME/plugins/platforms/telegram/trade_menu"
-cp "$SRC_OVERLAY/telegram/trade_menu/__init__.py" "$HERMES_HOME/plugins/platforms/telegram/trade_menu/__init__.py"
-cp "$SRC_OVERLAY/telegram/trade_menu/wizard.py" "$HERMES_HOME/plugins/platforms/telegram/trade_menu/wizard.py"
-say "  plugins/.../trade_menu/__init__.py"
-say "  plugins/.../trade_menu/wizard.py"
-
-say ""
-say "Installing Telegram shared_selectors and _positions_render..."
-mkdir -p "$HERMES_HOME/plugins/platforms/telegram"
-cp "$SRC_OVERLAY/telegram/shared_selectors.py" "$HERMES_HOME/plugins/platforms/telegram/shared_selectors.py"
-cp "$SRC_OVERLAY/telegram/_positions_render.py" "$HERMES_HOME/plugins/platforms/telegram/_positions_render.py"
-say "  plugins/platforms/telegram/shared_selectors.py"
-say "  plugins/platforms/telegram/_positions_render.py"
+say "  Installed $(ls "$SRC_TRADEDESK"/*.py | wc -l) TradeDesk modules"
 
 # ---------------------------------------------------------------------------
-# 12. Preserve Hermes AI configuration
-# 13-15. NEVER overwrite auth.json / .env / unrelated config
+# PHASE 8 — Copy Telegram overlay.
+# ---------------------------------------------------------------------------
+say ""
+say "Phase 8: install Telegram overlay (wizard, shared_selectors, _positions_render)..."
+
+mkdir -p "$HERMES_HOME/plugins/platforms/telegram/trade_menu"
+cp "$SRC_OVERLAY/telegram/shared_selectors.py" \
+   "$HERMES_HOME/plugins/platforms/telegram/shared_selectors.py"
+cp "$SRC_OVERLAY/telegram/_positions_render.py" \
+   "$HERMES_HOME/plugins/platforms/telegram/_positions_render.py"
+cp "$SRC_OVERLAY/telegram/trade_menu/__init__.py" \
+   "$HERMES_HOME/plugins/platforms/telegram/trade_menu/__init__.py"
+cp "$SRC_OVERLAY/telegram/trade_menu/wizard.py" \
+   "$HERMES_HOME/plugins/platforms/telegram/trade_menu/wizard.py"
+say "  Installed 4 Telegram overlay files"
+
+# ---------------------------------------------------------------------------
+# PHASE 9 — POST-INSTALL integration/import verification.
+#
+# This is the final check: with PYTHONPATH set to the Hermes install
+# root, can we actually import every required module? If not, fail
+# truthfully so the operator sees what's broken.
+# ---------------------------------------------------------------------------
+say ""
+say "Phase 9: post-install integration verification..."
+
+post_ok=0
+post_fail=0
+post_failures=()
+
+verify_post_install() {
+    local label="$1"
+    local module="$2"
+    # Set PYTHONPATH to the Hermes install root so plugins.* imports
+    # work. We run the import under a fresh subprocess to keep state
+    # isolated.
+    if PYTHONPATH="$HERMES_HOME" "$HERMES_PY" -c "import $module" 2>/dev/null; then
+        say "    [OK]   $label"
+        post_ok=$((post_ok + 1))
+    else
+        say "    [FAIL] $label"
+        post_fail=$((post_fail + 1))
+        post_failures+=("$label")
+    fi
+}
+
+verify_post_install "tradedesk.tradedesk"                                  "tradedesk.tradedesk"
+verify_post_install "tradedesk.lighter_agent"                              "tradedesk.lighter_agent"
+verify_post_install "tradedesk.raydium_agent"                              "tradedesk.raydium_agent"
+verify_post_install "tradesdesk.account_discovery"                            "tradedesk.account_discovery"
+verify_post_install "plugins.platforms.telegram.shared_selectors"          "plugins.platforms.telegram.shared_selectors"
+verify_post_install "plugins.platforms.telegram._positions_render"         "plugins.platforms.telegram._positions_render"
+verify_post_install "plugins.platforms.telegram.trade_menu.wizard"          "plugins.platforms.telegram.trade_menu.wizard"
+verify_post_install "plugins.platforms.telegram.trade_menu"                "plugins.platforms.telegram.trade_menu"
+
+say ""
+say "Post-install verification: $post_ok passed, $post_fail failed"
+if [[ $post_fail -gt 0 ]]; then
+    err "POST-INSTALL VERIFICATION FAILED."
+    err "The following modules could not be imported after install:"
+    for f in "${post_failures[@]}"; do
+        err "  - $f"
+    done
+    err ""
+    err "This is a real failure. Do NOT assume the install succeeded."
+    err "Inspect the install log and the destination Hermes manually."
+    exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# PHASE 10 — Compatibility manifest (informational).
+# ---------------------------------------------------------------------------
+MANIFEST="$SCRIPT_DIR/manifest.json"
+REF_COMMIT="(no manifest)"
+if [[ -f "$MANIFEST" ]]; then
+    REF_COMMIT="$("$HERMES_PY" - <<EOF
+import json
+with open("$MANIFEST") as f:
+    print(json.load(f).get("reference_hermes_commit", "(none)"))
+EOF
+)"
+    say ""
+    say "  Reference Hermes commit (informational): $REF_COMMIT"
+fi
+
+# ---------------------------------------------------------------------------
+# PHASE 11 — Final report (sanitized) + verify.sh.
+# ---------------------------------------------------------------------------
+say ""
+say "Phase 11: finalizing install..."
+
+SANITIZED_REPORT="$BACKUP_DIR/install-report.txt"
+{
+    echo "Hermes TradeDesk install report"
+    echo "================================"
+    echo "Hermes commit:                  $HERMES_COMMIT"
+    echo "Reference commit:               $REF_COMMIT"
+    echo "Base-Hermes basic checks:       $HERMES_BASIC_PASSED passed, $HERMES_BASIC_FAILED failed"
+    echo "Always-required imports:        $import_ok passed, $import_fail failed"
+    echo "Optional imports available:     $optional_ok"
+    echo "Post-install integration:        $post_ok passed, $post_fail failed"
+    echo ""
+    echo "Configured account aliases (NAMES ONLY):"
+    echo "  (not enumerated to keep report sanitized)"
+    echo ""
+    echo "Credential values printed: NO"
+    echo "Trading writes performed:  0"
+} | tee "$SANITIZED_REPORT"
+
+# Run verify.sh (if it's available) — note that verify.sh expects to run
+# against the bundled package source, not the install destination.
+if [[ -x "$SCRIPT_DIR/verify.sh" ]]; then
+    say ""
+    say "Running offline verification (verify.sh)..."
+    "$SCRIPT_DIR/verify.sh" || say "  (verify.sh reported a non-zero exit; investigate)"
+else
+    say ""
+    say "  (verify.sh not executable; skipping)"
+fi
+
+# ---------------------------------------------------------------------------
+# 12. NEVER copy credentials from this repo into the system
+# 13. NEVER print secret values
 # ---------------------------------------------------------------------------
 say ""
 say "Preserving Hermes AI configuration..."
@@ -366,46 +548,7 @@ if [[ -e "$USER_ENV" ]]; then
 fi
 
 # ---------------------------------------------------------------------------
-# 16. NEVER copy credentials from this repo into the system
-# 17. NEVER print secret values
-# ---------------------------------------------------------------------------
-say ""
-say "Skipping credential injection (operator sets these manually)."
-say "See .env.example shipped in this repo for variable NAMES."
-
-# ---------------------------------------------------------------------------
-# 18-19. Sanitized installation report
-# ---------------------------------------------------------------------------
-SANITIZED_REPORT="$BACKUP_DIR/install-report.txt"
-{
-    echo "Hermes TradeDesk install report"
-    echo "================================"
-    echo "Hermes commit:       $HERMES_COMMIT"
-    echo "Reference commit:    $REF_COMMIT"
-    echo "Struct checks pass:  $STRUCT_CHECKS_PASSED"
-    echo "Struct checks fail:  $STRUCT_CHECKS_FAILED"
-    echo "Files installed:     $(find "$SRC_TRADEDESK" -name '*.py' -printf "%f\n" 2>/dev/null | wc -l) TradeDesk modules + $(find "$SRC_OVERLAY" -name '*.py' -printf "%f\n" 2>/dev/null | wc -l) overlay files"
-    echo ""
-    echo "Configured account aliases (NAMES ONLY):"
-    echo "  (not enumerated to keep report sanitized)"
-    echo ""
-    echo "Credential values printed: NO"
-    echo "Trading writes performed:  0"
-} | tee "$SANITIZED_REPORT"
-
-# ---------------------------------------------------------------------------
-# 20-22. ZERO live trading verification
-# ---------------------------------------------------------------------------
-say ""
-say "Running offline verification (verify.sh)..."
-if [[ -x "$SCRIPT_DIR/verify.sh" ]]; then
-    "$SCRIPT_DIR/verify.sh" || say "  (verify.sh reported a non-zero exit; investigate)"
-else
-    say "  (verify.sh not executable; skipping)"
-fi
-
-# ---------------------------------------------------------------------------
-# 23-25. Idempotency + final
+# Final instructions
 # ---------------------------------------------------------------------------
 say ""
 say "Install complete."

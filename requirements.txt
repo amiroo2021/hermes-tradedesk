@@ -9,14 +9,16 @@
 #     Hermes itself; not installed by us)
 #
 # If a pip install is needed at install time, the installer runs
-#   python -m pip install --no-deps -r requirements.txt
-# against the existing Hermes venv. --no-deps avoids accidentally
-# downgrading shared transitive dependencies (eth-account, eth-utils,
-# web3, etc., are all shared with upstream Hermes code).
+#   python -m pip install -r requirements.txt
+# against the existing Hermes venv. We use pip's default dependency
+# resolution (no --no-deps) so transitive deps (eth-hash, eth-rlp,
+# pycryptodome-via-eth-account, etc.) are correctly installed.
 #
-# The fallback chain in rise_agent.py keeps keccak256 working without
-# `pysha3` because pycryptodome is listed below. Do not add pysha3
-# unless the working implementation actually requires it.
+# Packages marked `# private/` cannot be installed from PyPI (e.g. they
+# are private/edge packages only available on the DigitalOcean server).
+# The installer treats them as documentation-only and does not attempt
+# to install them. They are NOT required for the wizard to function;
+# they are only needed when the operator uses that specific exchange.
 # -----------------------------------------------------------------------------
 
 # EIP-712 / EVM signing (Rise, AFx, Hyperliquid, Raydium)
@@ -42,10 +44,16 @@ requests==2.33.0
 # error at runtime only when their code path is exercised)
 hyperliquid-python-sdk==0.24.0
 apexomni==3.3.1
-afx-python-sdk==0.1.0
-
-# Lighter perpetuals exchange SDK
 lighter-sdk==1.1.2
 
 # Telegram bot framework (used by the wizard)
 python-telegram-bot==22.6
+
+# -----------------------------------------------------------------------------
+# Private / off-PyPI packages (documentation only; not installed by the
+# installer). These are private/edge packages that exist only on the
+# DigitalOcean production server's local pip cache. Operators who want
+# to use these exchanges must obtain the package separately and install
+# it manually (e.g. via `pip install /path/to/afx-python-sdk-0.1.0.tar.gz`).
+# -----------------------------------------------------------------------------
+# private/ afx-python-sdk==0.1.0   # AFx exchange SDK; private/edge package

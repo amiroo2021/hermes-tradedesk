@@ -165,7 +165,8 @@ echo
 echo "requirements.txt sanity check:"
 if [[ -f "$SCRIPT_DIR/requirements.txt" ]]; then
     pass "  requirements.txt present"
-    n=$(grep -cE "^[a-zA-Z0-9_-]+>=" "$SCRIPT_DIR/requirements.txt" 2>/dev/null || echo 0)
+    # Match any pip requirement specifier (== >= <= ~= != === > <).
+    n=$(grep -cE "^[A-Za-z0-9_.-]+[[:space:]]*(==|>=|<=|~=|!=|===|>|<)" "$SCRIPT_DIR/requirements.txt" 2>/dev/null || echo 0)
     echo "  declared packages: $n"
 else
     fail "  requirements.txt missing"
