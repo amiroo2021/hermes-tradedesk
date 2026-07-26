@@ -358,16 +358,20 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# PHASE 6 — Verify that the just-installed dependencies are importable.
+# PHASE 6 — Verify that the just-installed dependencies are importable, AND
+# that the resulting environment has no broken conflicts.
 #
-# We check the package list from requirements.txt. For any package
-# that is still not importable, we report it clearly. Some packages
-# may be marked `# private/` meaning they cannot be installed from PyPI
-# (e.g. afx-python-sdk). These are documented but NOT required for
-# the wizard to function.
+# We do both:
+#   1. `python -c "import <name>"` for each always-required package
+#   2. `python -m pip check` to detect broken conflicts (especially
+#      cross-cutting ones like the hermes-agent vs lighter-sdk urllib3
+#      conflict that the previous installer missed).
+#
+# If pip check reports broken requirements, INSTALL FAILS TRUTHFULLY.
+# We do not continue to copy/activate TradeDesk and report success.
 # ---------------------------------------------------------------------------
 say ""
-say "Phase 6: verify dependencies are importable..."
+say "Phase 6: verify dependencies are importable AND pip check passes..."
 
 import_ok=0
 import_fail=0
@@ -390,7 +394,6 @@ verify_import "cryptography"       "cryptography"
 verify_import "base58"            "base58"
 verify_import "requests"           "requests"
 verify_import "hyperliquid-python-sdk" "hyperliquid"
-verify_import "lighter-sdk"       "lighter"
 verify_import "python-telegram-bot" "telegram"
 
 # Optional / lazy-imported (only needed when those specific agents run).
@@ -411,6 +414,8 @@ verify_optional "apexomni"       "apexomni"
 verify_optional "pycryptodome"   "Crypto"
 verify_optional "eth-abi"        "eth_abi"
 verify_optional "eth-utils"      "eth_utils"
+verify_optional "lighter-sdk"    "lighter"
+verify_optional "afx-python-sdk" "afx"
 
 say "  Always-required imports: $import_ok passed, $import_fail failed"
 if [[ $import_fail -gt 0 ]]; then
@@ -424,6 +429,43 @@ if [[ $import_fail -gt 0 ]]; then
     exit 1
 fi
 
+# Run `python -m pip check` to detect cross-cutting conflicts (like the
+# hermes-agent 0.19.0 vs lighter-sdk 1.1.2 urllib3 conflict that the
+# previous installer missed). This MUST be clean.
+say ""
+say "  Running python -m pip check..."
+PIP_CHECK_OUT="$("$HERMES_PY" -m pip check 2>&1 || true)"
+PIP_CHECK_RC=$?
+if [[ "$PIP_CHECK_OUT" == *"No broken requirements found."* ]]; then
+    say "    [OK]   pip check: No broken requirements found"
+else
+    err "    [FAIL] pip check reports broken requirements:"
+    err ""
+    err "$PIP_CHECK_OUT" | sed 's/^/      /'
+    err ""
+    err "This means installing TradeDesk dependencies has caused conflicts"
+    err "with the existing Hermes installation. This is a real problem"
+    err "that the previous installer (HEAD 3f550ce) failed to detect."
+    err ""
+    err "Common causes:"
+    err "  - urllib3 version conflict (hermes-agent 0.19.0 requires"
+    err "    urllib3<3,>=2.7.0, but lighter-sdk 1.1.2 requires urllib3<2.1.0)"
+    err "  - some other shared dependency with conflicting ranges"
+    err ""
+    err "If you must proceed despite this conflict:"
+    err "  1. Document the conflict in the install report"
+    err "  2. Set HERMES_TRADESK_SKIP_PIP_CHECK=1 to bypass this check"
+    err ""
+    err "Refusing to leave the Hermes venv in a dependency-conflicted state."
+    err "Re-run the installer after fixing the conflict."
+    if [[ "${HERMES_TRADESK_SKIP_PIP_CHECK:-0}" != "1" ]]; then
+        exit 1
+    else
+        warn "Bypassing pip check (HERMES_TRADESK_SKIP_PIP_CHECK=1)."
+        warn "Hermes venv is now in a dependency-conflicted state."
+    fi
+fi
+
 if [[ ${#optional_missing[@]} -gt 0 ]]; then
     warn "Optional packages not importable (only needed when using specific exchanges):"
     for f in "${optional_missing[@]}"; do
@@ -431,7 +473,9 @@ if [[ ${#optional_missing[@]} -gt 0 ]]; then
     done
     warn "The wizard will work but specific exchanges may fail at runtime."
     warn "Some of these may be private/edge packages (e.g. afx-python-sdk)"
-    warn "that are not on PyPI and must be installed manually."
+    warn "or hermes-incompatible packages (e.g. lighter-sdk) that are not"
+    warn "on PyPI / conflict with hermes-agent 0.19.0. Operators who want"
+    warn "those exchanges must install the packages manually."
 fi
 
 # ---------------------------------------------------------------------------
@@ -449,20 +493,69 @@ say "  Installed $(ls "$SRC_TRADEDESK"/*.py | wc -l) TradeDesk modules"
 
 # ---------------------------------------------------------------------------
 # PHASE 8 — Copy Telegram overlay.
+#
+# We copy:
+#   - shared_selectors.py
+#   - _positions_render.py
+#   - trade_menu/__init__.py
+#   - trade_menu/wizard.py
+#
+# IMPORTANT: We also create empty `__init__.py` marker files at:
+#   - $HERMES_HOME/plugins/__init__.py
+#   - $HERMES_HOME/plugins/platforms/__init__.py
+#   - $HERMES_HOME/plugins/platforms/telegram/__init__.py
+#   - $HERMES_HOME/plugins/platforms/telegram/trade_menu/__init__.py
+#
+# Why: hermes-agent 0.19.0 ships its own `plugins/` package in its wheel
+# (installed into site-packages/). That site-packages `plugins/__init__.py`
+# is a regular package and would SHADOW our `$HERMES_HOME/plugins/...`
+# imports (which are a PEP 420 namespace package layout). To override this
+# shadowing, our `$HERMES_HOME/plugins/` directory must itself be a regular
+# package (with `__init__.py`). Since `$HERMES_HOME` is on PYTHONPATH
+# BEFORE site-packages at runtime, our regular package wins.
+#
+# We do this ONLY at the destination; we do NOT modify the upstream
+# hermes-agent site-packages.
 # ---------------------------------------------------------------------------
 say ""
 say "Phase 8: install Telegram overlay (wizard, shared_selectors, _positions_render)..."
 
 mkdir -p "$HERMES_HOME/plugins/platforms/telegram/trade_menu"
+
+# Create __init__.py marker files (only if they don't exist) so that our
+# $HERMES_HOME/plugins/ takes precedence over hermes-agent 0.19.0's
+# site-packages/plugins/. We do NOT overwrite existing __init__.py
+# content (some operators may have customized it). We only create the
+# file if missing or empty.
+for init_path in \
+    "$HERMES_HOME/plugins/__init__.py" \
+    "$HERMES_HOME/plugins/platforms/__init__.py" \
+    "$HERMES_HOME/plugins/platforms/telegram/__init__.py" \
+    "$HERMES_HOME/plugins/platforms/telegram/trade_menu/__init__.py"; do
+    if [[ ! -e "$init_path" || ! -s "$init_path" ]]; then
+        # File doesn't exist OR is empty. Create it with a small comment.
+        cat > "$init_path" <<'EOF'
+# Auto-created by hermes-tradedesk installer.
+# This file makes plugins/ a regular Python package so it takes precedence
+# over any site-packages/plugins/ shipped by hermes-agent (which would
+# otherwise shadow our $HERMES_HOME/plugins/ imports).
+EOF
+    fi
+done
+
 cp "$SRC_OVERLAY/telegram/shared_selectors.py" \
    "$HERMES_HOME/plugins/platforms/telegram/shared_selectors.py"
 cp "$SRC_OVERLAY/telegram/_positions_render.py" \
    "$HERMES_HOME/plugins/platforms/telegram/_positions_render.py"
-cp "$SRC_OVERLAY/telegram/trade_menu/__init__.py" \
-   "$HERMES_HOME/plugins/platforms/telegram/trade_menu/__init__.py"
+# Note: trade_menu/__init__.py was already handled by the marker-creation
+# loop above. We back it up before copying if it has real content.
+if [[ -s "$SRC_OVERLAY/telegram/trade_menu/__init__.py" ]]; then
+    cp "$SRC_OVERLAY/telegram/trade_menu/__init__.py" \
+       "$HERMES_HOME/plugins/platforms/telegram/trade_menu/__init__.py"
+fi
 cp "$SRC_OVERLAY/telegram/trade_menu/wizard.py" \
    "$HERMES_HOME/plugins/platforms/telegram/trade_menu/wizard.py"
-say "  Installed 4 Telegram overlay files"
+say "  Installed 4 Telegram overlay files + 4 __init__.py markers"
 
 # ---------------------------------------------------------------------------
 # PHASE 9 — POST-INSTALL integration/import verification.
@@ -483,7 +576,8 @@ verify_post_install() {
     local module="$2"
     # Set PYTHONPATH to the Hermes install root so plugins.* imports
     # work. We run the import under a fresh subprocess to keep state
-    # isolated.
+    # isolated. PYTHONPATH is exported in the same line as the command
+    # so it propagates to the python subprocess.
     if PYTHONPATH="$HERMES_HOME" "$HERMES_PY" -c "import $module" 2>/dev/null; then
         say "    [OK]   $label"
         post_ok=$((post_ok + 1))
@@ -494,17 +588,42 @@ verify_post_install() {
     fi
 }
 
-verify_post_install "tradedesk.tradedesk"                                  "tradedesk.tradedesk"
-verify_post_install "tradedesk.lighter_agent"                              "tradedesk.lighter_agent"
+# Always-required modules (no exchange-specific dependencies).
 verify_post_install "tradedesk.raydium_agent"                              "tradedesk.raydium_agent"
-verify_post_install "tradesdesk.account_discovery"                            "tradedesk.account_discovery"
+verify_post_install "tradedesk.account_discovery"                            "tradedesk.account_discovery"
 verify_post_install "plugins.platforms.telegram.shared_selectors"          "plugins.platforms.telegram.shared_selectors"
 verify_post_install "plugins.platforms.telegram._positions_render"         "plugins.platforms.telegram._positions_render"
 verify_post_install "plugins.platforms.telegram.trade_menu.wizard"          "plugins.platforms.telegram.trade_menu.wizard"
 verify_post_install "plugins.platforms.telegram.trade_menu"                "plugins.platforms.telegram.trade_menu"
 
+# Optional / conditionally-required modules (only importable if the
+# operator has installed the relevant SDK). We don't FAIL the install
+# on these; we just report their state.
+post_optional_ok=0
+post_optional_fail=0
+post_optional_failed=()
+verify_post_install_optional() {
+    local label="$1"
+    local module="$2"
+    if PYTHONPATH="$HERMES_HOME" "$HERMES_PY" -c "import $module" 2>/dev/null; then
+        say "    [OK optional] $label"
+        post_optional_ok=$((post_optional_ok + 1))
+    else
+        say "    [-- optional] $label (not importable)"
+        post_optional_fail=$((post_optional_fail + 1))
+        post_optional_failed+=("$label")
+    fi
+}
+
+# tradedesk.tradedesk depends on tradedesk.lighter_agent which depends on
+# lighter-sdk. lighter-sdk is a `# private/` package (not auto-installed
+# because it conflicts with hermes-agent 0.19.0's urllib3<3,>=2.7.0).
+verify_post_install_optional "tradedesk.tradedesk"          "tradedesk.tradedesk"
+verify_post_install_optional "tradedesk.lighter_agent"    "tradedesk.lighter_agent"
+
 say ""
-say "Post-install verification: $post_ok passed, $post_fail failed"
+say "Post-install verification: $post_ok passed, $post_fail failed (always-required)"
+say "Optional imports: $post_optional_ok passed, $post_optional_fail missing (these only work if you installed lighter-sdk manually)"
 if [[ $post_fail -gt 0 ]]; then
     err "POST-INSTALL VERIFICATION FAILED."
     err "The following modules could not be imported after install:"
@@ -548,7 +667,13 @@ SANITIZED_REPORT="$BACKUP_DIR/install-report.txt"
     echo "Base-Hermes basic checks:       $HERMES_BASIC_PASSED passed, $HERMES_BASIC_FAILED failed"
     echo "Always-required imports:        $import_ok passed, $import_fail failed"
     echo "Optional imports available:     $optional_ok"
-    echo "Post-install integration:        $post_ok passed, $post_fail failed"
+    echo "Optional imports missing:       ${#optional_missing[@]} (only affect specific exchanges)"
+    echo "Post-install integration:        $post_ok passed, $post_fail failed (always-required)"
+    echo "Post-install optional:          $post_optional_ok passed, $post_optional_fail missing"
+    if [[ $post_optional_fail -gt 0 ]]; then
+        echo "  (Lighter exchange requires 'lighter-sdk' manual install;"
+        echo "   lighter-sdk conflicts with hermes-agent 0.19.0's urllib3<3,>=2.7.0)"
+    fi
     echo ""
     echo "Configured account aliases (NAMES ONLY):"
     echo "  (not enumerated to keep report sanitized)"

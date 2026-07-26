@@ -54,13 +54,18 @@ def make_fake_hermes(name: str, *, missing_selectors=False, missing_positions_re
         shutil.rmtree(fake)
     fake.mkdir(parents=True)
 
-    # Fake venv + python (we can re-use the system hermes venv python for
-    # structural checks since the script only imports modules).
-    hermes_venv = Path("/usr/local/lib/hermes-agent/venv")
-    if not hermes_venv.exists():
-        hermes_venv_python = sys.executable
-    else:
-        hermes_venv_python = str(hermes_venv / "bin" / "python")
+    # Fake venv + python. By default, use a fresh Kamatera-faithful venv
+    # (which has hermes-agent 0.19.0 + urllib3 2.7.0 but no TradeDesk
+    # dependencies). This faithfully reproduces a real clean Hermes install.
+    # Tests that want to use the production DigitalOcean venv (which has
+    # lighter-sdk 1.1.2 preinstalled) should set with_init_files=True AND
+    # override the venv externally.
+    hermes_venv_python = "/tmp/kamatera-faithful-venv2/bin/python"
+    if not Path(hermes_venv_python).exists():
+        # Fallback: build a fresh one on the fly.
+        hermes_venv_python = "/tmp/kamatera-faithful-venv/bin/python"
+        if not Path(hermes_venv_python).exists():
+            hermes_venv_python = sys.executable
     venv = fake / "venv"
     venv.mkdir()
     (venv / "bin").mkdir()

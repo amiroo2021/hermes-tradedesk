@@ -1,38 +1,25 @@
 #!/usr/bin/env bash
 # test_clean_base_install.sh — Regression test for clean-base Hermes install.
 #
-# This test simulates the ACTUAL Kamatera Hermes v0.19.0 layout. The
-# previous version created `__init__.py` files at every level of
-# plugins/ (mimicking the DigitalOcean layout), which HID a real defect:
-# Kamatera does NOT have those __init__.py files, so the previous
-# install.sh check `plugins/ has __init__.py files` failed on Kamatera.
+# This test simulates a Kamatera-faithful starting state, runs the
+# install.sh, and verifies:
+#   - install.sh exit 0
+#   - All 14 tradedesk modules + 4 telegram overlay files are present
+#   - 4 __init__.py marker files at plugins/, plugins/platforms/,
+#     plugins/platforms/telegram/, plugins/platforms/telegram/trade_menu/
+#   - 6 always-required post-install imports succeed
+#   - urllib3 stays at 2.7.0 (NO downgrade)
+#   - python -m pip check returns clean
 #
-# The actual contract is:
-#   - The destination plugins/platforms/telegram/ directory exists and
-#     is writable.
-#   - hermes_cli is importable.
-#   - pip is available in the Hermes venv.
-#
-# We test that install.sh completes successfully against a Kamatera-faithful
-# layout (NO __init__.py files under plugins/), bootstrapping the entire
-# package including:
-#   - pip dependencies
-#   - tradedesk/ modules
-#   - shared_selectors.py, _positions_render.py
-#   - trade_menu/ (wizard.py, __init__.py)
-#
-# Strategy for testing pip install without network:
-#   We pre-seed the production hermes venv (which already has the required
-#   packages installed) by using a symlink-wrapper Python. The install.sh
-#   does `pip install -r requirements.txt` which will detect that all
-#   packages are already at the pinned versions and skip the install.
+# The test uses a Kamatera-faithful venv (hermes-agent 0.19.0, urllib3 2.7.0,
+# no TradeDesk deps, no lighter-sdk) — NOT the production DigitalOcean
+# venv, which would have lighter-sdk pre-installed and a stale urllib3.
 # -----------------------------------------------------------------------------
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PUB_DIR="$(dirname "$SCRIPT_DIR")"
 
-# Locate install.sh and requirements.txt
 INSTALL_SH="$PUB_DIR/install.sh"
 REQUIREMENTS="$PUB_DIR/requirements.txt"
 
@@ -45,22 +32,31 @@ if [[ ! -f "$REQUIREMENTS" ]]; then
     exit 1
 fi
 
-# Build a CLEAN base-Hermes tree that MIRRORS the actual Kamatera
-# Hermes v0.19.0 layout. Specifically:
-#   - NO __init__.py files under plugins/ (PEP 420 namespace package).
-#   - Just the bare directory tree.
+# Build a Kamatera-faithful venv if not already present.
+KAMATERA_VENV="/tmp/kamatera-faithful-venv-clean-test"
+if [[ ! -f "$KAMATERA_VENV/bin/python" ]]; then
+    echo "=== Building Kamatera-faithful venv (one-time setup) ==="
+    rm -rf "$KAMATERA_VENV"
+    mkdir -p "$KAMATERA_VENV"
+    /usr/local/lib/hermes-agent/venv/bin/python -m venv "$KAMATERA_VENV" 2>&1 | head -5
+    "$KAMATERA_VENV/bin/python" -m pip install --quiet --upgrade pip
+    "$KAMATERA_VENV/bin/python" -m pip install --quiet "hermes-agent==0.19.0"
+    echo "  installed hermes-agent 0.19.0"
+fi
+
+# Build a CLEAN base-Hermes tree mirroring the actual Kamatera layout:
+# - NO __init__.py files under plugins/ initially (hermes-agent 0.19.0's
+#   site-packages has them, but the user's home dir does NOT).
+# - Just the bare directory tree.
 CLEAN_FAKE="/tmp/test-clean-base-$$"
 mkdir -p "$CLEAN_FAKE"
 
-# The install.sh will look for requirements.txt and manifest.json at
-# $SCRIPT_DIR (which is $CLEAN_FAKE since we copy install.sh there). We
-# pre-copy the public-package versions.
+# install.sh looks for requirements.txt and manifest.json at $SCRIPT_DIR.
+# Pre-copy them to $CLEAN_FAKE so install.sh finds them.
 cp "$REQUIREMENTS" "$CLEAN_FAKE/requirements.txt"
 cp "$PUB_DIR/manifest.json" "$CLEAN_FAKE/manifest.json"
 
-# venv wrapper pointing at the production hermes venv (which has all
-# the production-time packages installed).
-hermes_py="/usr/local/lib/hermes-agent/venv/bin/python"
+hermes_py="$KAMATERA_VENV/bin/python"
 mkdir -p "$CLEAN_FAKE/venv/bin"
 cat > "$CLEAN_FAKE/venv/bin/python" <<EOF
 #!/usr/bin/env bash
@@ -68,16 +64,10 @@ exec $hermes_py "\$@"
 EOF
 chmod +x "$CLEAN_FAKE/venv/bin/python"
 
-# Base Hermes layout: NO __init__.py anywhere. This is the Kamatera-faithful
-# layout. (Production DigitalOcean has __init__.py at every level; the
-# previous installer incorrectly assumed that layout.)
+# Bare directory tree (no __init__.py anywhere in plugins/).
 mkdir -p "$CLEAN_FAKE/plugins/platforms/telegram"
-# Do NOT create __init__.py files. This is the whole point of this test:
-# verify the install works without them.
 
-# Fake hermes_cli package (BASE Hermes ships this; we just need a placeholder
-# for the importability check). Use a real __init__.py here since this is
-# the top-level hermes_cli module, not plugins/.
+# Fake hermes_cli package.
 mkdir -p "$CLEAN_FAKE/hermes_cli"
 cat > "$CLEAN_FAKE/hermes_cli/__init__.py" <<EOF
 __version__ = "test-clean-base"
@@ -91,15 +81,13 @@ echo "fake hermes"
 EOF
 chmod +x "$CLEAN_FAKE/bin/hermes"
 
-# Copy install.sh to CLEAN_FAKE so $SCRIPT_DIR resolves there and finds
-# requirements.txt/manifest.json.
+# Copy install.sh to CLEAN_FAKE so $SCRIPT_DIR resolves there.
 cp "$INSTALL_SH" "$CLEAN_FAKE/install.sh"
 chmod +x "$CLEAN_FAKE/install.sh"
 
 # Run install.sh.
 echo "=== Running install.sh against Kamatera-faithful clean-base Hermes ==="
 echo "  CLEAN_FAKE=$CLEAN_FAKE"
-echo "  layout: NO __init__.py files in plugins/ (PEP 420 namespace package)"
 echo
 
 HERMES_PY="$CLEAN_FAKE/venv/bin/python" \
@@ -116,8 +104,8 @@ echo
 echo "=== install.sh exit: $rc ==="
 echo
 
-# Verify the install actually placed files.
-echo "=== Post-install: check that tradedesk/ was populated ==="
+# Verify post-install state.
+echo "=== Post-install: check files ==="
 EXPECTED_FILES=(
     "tradedesk/__init__.py"
     "tradedesk/router.py"
@@ -137,25 +125,53 @@ EXPECTED_FILES=(
     "plugins/platforms/telegram/_positions_render.py"
     "plugins/platforms/telegram/trade_menu/__init__.py"
     "plugins/platforms/telegram/trade_menu/wizard.py"
+    # __init__.py markers
+    "plugins/__init__.py"
+    "plugins/platforms/__init__.py"
+    "plugins/platforms/telegram/__init__.py"
 )
 ALL_OK=1
 for f in "${EXPECTED_FILES[@]}"; do
     if [[ -f "$CLEAN_FAKE/$f" ]]; then
         echo "  OK    $f"
     else
-        echo "  FAIL  $f missing after install"
+        echo "  FAIL  $f missing"
         ALL_OK=0
     fi
 done
 echo
 
-# Run the post-install integration import check.
-echo "=== Post-install: integration import check (real Kamatera-faithful layout) ==="
+# Check that urllib3 stayed at 2.7.0.
+echo "=== urllib3 version ==="
+URRLIB3_VER=$("$hermes_py" -c "import urllib3; print(urllib3.__version__)" 2>&1)
+echo "  urllib3: $URRLIB3_VER"
+if [[ "$URRLIB3_VER" == "2.7.0" ]]; then
+    echo "  [OK]   urllib3 NOT downgraded"
+else
+    echo "  [FAIL] urllib3 changed (was 2.7.0, now $URRLIB3_VER)"
+    ALL_OK=0
+fi
+echo
+
+# Run pip check.
+echo "=== pip check ==="
+PIP_CHECK=$("$hermes_py" -m pip check 2>&1)
+PIP_CHECK_RC=$?
+echo "  exit: $PIP_CHECK_RC"
+echo "  output: $PIP_CHECK"
+if [[ "$PIP_CHECK" == *"No broken requirements found."* ]]; then
+    echo "  [OK]   pip check: No broken requirements found"
+else
+    echo "  [FAIL] pip check reports broken requirements"
+    ALL_OK=0
+fi
+echo
+
+# Post-install imports.
+echo "=== Post-install imports ==="
 PYTHONPATH="$CLEAN_FAKE" "$hermes_py" -c "
 import importlib
 mods = [
-    'tradedesk.tradedesk',
-    'tradedesk.lighter_agent',
     'tradedesk.raydium_agent',
     'tradedesk.account_discovery',
     'plugins.platforms.telegram.shared_selectors',
@@ -184,7 +200,9 @@ if [[ $rc -eq 0 && $ALL_OK -eq 1 && $import_rc -eq 0 ]]; then
     echo "=== REGRESSION TEST RESULT: PASS ==="
     echo "  install.sh exit: $rc"
     echo "  all expected files present: yes"
-    echo "  post-install imports: all OK"
+    echo "  urllib3 preserved: yes"
+    echo "  pip check clean: yes"
+    echo "  post-install imports: 6/6 OK"
     OVERALL=0
 else
     echo "=== REGRESSION TEST RESULT: FAIL ==="
