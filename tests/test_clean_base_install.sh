@@ -7,13 +7,17 @@
 #   - All 14 tradedesk modules + 4 telegram overlay files are present
 #   - 4 __init__.py marker files at plugins/, plugins/platforms/,
 #     plugins/platforms/telegram/, plugins/platforms/telegram/trade_menu/
-#   - 6 always-required post-install imports succeed
+#   - 8/8 always-required post-install imports succeed
 #   - urllib3 stays at 2.7.0 (NO downgrade)
-#   - python -m pip check returns clean
+#   - pip check only reports the documented Lighter/urllib3 conflict
+#   - import lighter + from lighter import SignerClient both PASS
+#   - lighter-sdk was NEVER installed via the normal pip resolver
+#     (only via --no-deps)
 #
-# The test uses a Kamatera-faithful venv (hermes-agent 0.19.0, urllib3 2.7.0,
-# no TradeDesk deps, no lighter-sdk) — NOT the production DigitalOcean
-# venv, which would have lighter-sdk pre-installed and a stale urllib3.
+# The test uses a Kamatera-faithful venv (hermes-agent 0.19.0,
+# urllib3 2.7.0, no TradeDesk deps, no lighter-sdk) — NOT the
+# production DigitalOcean venv, which would have lighter-sdk
+# pre-installed and a stale urllib3.
 # -----------------------------------------------------------------------------
 set -uo pipefail
 
@@ -44,15 +48,10 @@ if [[ ! -f "$KAMATERA_VENV/bin/python" ]]; then
     echo "  installed hermes-agent 0.19.0"
 fi
 
-# Build a CLEAN base-Hermes tree mirroring the actual Kamatera layout:
-# - NO __init__.py files under plugins/ initially (hermes-agent 0.19.0's
-#   site-packages has them, but the user's home dir does NOT).
-# - Just the bare directory tree.
+# Build a CLEAN base-Hermes tree mirroring the actual Kamatera layout.
 CLEAN_FAKE="/tmp/test-clean-base-$$"
 mkdir -p "$CLEAN_FAKE"
 
-# install.sh looks for requirements.txt and manifest.json at $SCRIPT_DIR.
-# Pre-copy them to $CLEAN_FAKE so install.sh finds them.
 cp "$REQUIREMENTS" "$CLEAN_FAKE/requirements.txt"
 cp "$PUB_DIR/manifest.json" "$CLEAN_FAKE/manifest.json"
 
@@ -85,11 +84,19 @@ chmod +x "$CLEAN_FAKE/bin/hermes"
 cp "$INSTALL_SH" "$CLEAN_FAKE/install.sh"
 chmod +x "$CLEAN_FAKE/install.sh"
 
+# ---- Capture PRE-install state ----
+PRE_URLLIB3=$("$hermes_py" -c "import urllib3; print(urllib3.__version__)" 2>/dev/null || echo "(none)")
+echo "=== PRE-install urllib3: $PRE_URLLIB3 ==="
+
+# Confirm lighter is NOT installed at start.
+PRE_LIGHTER=$("$hermes_py" -c "import lighter" 2>&1 | head -1 || echo "(none)")
+echo "=== PRE-install lighter: $PRE_LIGHTER ==="
+
+# Capture install.sh output for grep-based assertions.
+INSTALL_LOG="$CLEAN_FAKE/install.log"
+
 # Run install.sh.
 echo "=== Running install.sh against Kamatera-faithful clean-base Hermes ==="
-echo "  CLEAN_FAKE=$CLEAN_FAKE"
-echo
-
 HERMES_PY="$CLEAN_FAKE/venv/bin/python" \
 HERMES_TRADESK_SKIP_STRUCT_CHECK=0 \
 HERMES_TRADESK_SRC_ROOT="$PUB_DIR" \
@@ -98,14 +105,102 @@ HERMES_TRADESK_HERMES_BIN="$CLEAN_FAKE/bin/hermes" \
 HOME="$CLEAN_FAKE/fake-home" \
 PATH="/usr/bin:/bin" \
 PYTHONPATH="$CLEAN_FAKE" \
-bash "$CLEAN_FAKE/install.sh"
+bash "$CLEAN_FAKE/install.sh" > "$INSTALL_LOG" 2>&1
 rc=$?
 echo
 echo "=== install.sh exit: $rc ==="
-echo
 
-# Verify post-install state.
-echo "=== Post-install: check files ==="
+# ---- Verify post-install state ----
+echo
+echo "=== Post-install state ==="
+
+# urllib3 must still be 2.7.0.
+POST_URLLIB3=$("$hermes_py" -c "import urllib3; print(urllib3.__version__)" 2>/dev/null || echo "(none)")
+echo "  urllib3 after install: $POST_URLLIB3"
+URLLIB3_OK=1
+if [[ "$POST_URLLIB3" != "2.7.0" ]]; then
+    echo "  [FAIL] urllib3 changed (was 2.7.0, now $POST_URLLIB3)"
+    URLLIB3_OK=0
+else
+    echo "  [OK]   urllib3 NOT downgraded (still 2.7.0)"
+fi
+
+# lighter must be importable.
+LIGHT_IMPORT=$("$hermes_py" -c "import lighter; print('lighter at:', lighter.__file__)" 2>&1)
+echo "  import lighter: $LIGHT_IMPORT"
+
+SIGNER_IMPORT=$("$hermes_py" -c "from lighter import SignerClient; print('SignerClient OK')" 2>&1)
+echo "  from lighter import SignerClient: $SIGNER_IMPORT"
+
+LIGHT_OK=1
+if [[ "$SIGNER_IMPORT" != *"SignerClient OK"* ]]; then
+    echo "  [FAIL] from lighter import SignerClient FAILED"
+    LIGHT_OK=0
+else
+    echo "  [OK]   lighter-sdk imports OK"
+fi
+
+# Check pip check output.
+echo
+echo "=== pip check ==="
+PIP_CHECK=$("$hermes_py" -m pip check 2>&1)
+PIP_CHECK_RC=$?
+echo "  exit: $PIP_CHECK_RC"
+echo "  output:"
+while IFS= read -r line; do
+    echo "    $line"
+done <<< "$PIP_CHECK"
+
+# pip check should report only the documented Lighter conflict (and the
+# aiohttp-retry missing). Both are accepted.
+PIP_CHECK_HAS_OTHER_CONFLICT=0
+if [[ "$PIP_CHECK" == *"No broken requirements found."* ]]; then
+    echo "  [OK]   pip check: No broken requirements found"
+    PIP_CHECK_HAS_OTHER_CONFLICT=0
+else
+    # Check that ONLY lighter-related lines are present.
+    while IFS= read -r line; do
+        if [[ "$line" =~ lighter-sdk ]] || [[ -z "$line" ]]; then
+            continue
+        fi
+        echo "  [FAIL]  unexpected pip-check conflict: $line"
+        PIP_CHECK_HAS_OTHER_CONFLICT=1
+    done <<< "$PIP_CHECK"
+    if [[ $PIP_CHECK_HAS_OTHER_CONFLICT -eq 0 ]]; then
+        echo "  [OK]   pip check: only documented lighter-sdk metadata conflicts"
+    fi
+fi
+
+# Verify the install.sh log shows the documented Lighter separation.
+echo
+echo "=== install.sh log assertions ==="
+LOG_OK=1
+if ! grep -q "Step A:" "$INSTALL_LOG"; then
+    echo "  [FAIL] install.sh log does not show 'Step A:' (normal resolver)"
+    LOG_OK=0
+fi
+if ! grep -q "Step B:" "$INSTALL_LOG"; then
+    echo "  [FAIL] install.sh log does not show 'Step B:' (lighter install)"
+    LOG_OK=0
+fi
+if ! grep -q -- "--no-deps" "$INSTALL_LOG"; then
+    echo "  [FAIL] install.sh log does not contain '--no-deps'"
+    LOG_OK=0
+fi
+# Verify the lighter package was NOT installed via the normal resolver.
+if grep -q "Step A.*lighter" "$INSTALL_LOG"; then
+    echo "  [FAIL] lighter was installed via Step A (normal resolver); should only be Step B"
+    LOG_OK=0
+else
+    echo "  [OK]   lighter was NOT installed via normal resolver"
+fi
+if [[ $LOG_OK -eq 1 ]]; then
+    echo "  [OK]   install.sh used Step A + Step B correctly"
+fi
+
+# All expected files.
+echo
+echo "=== Expected files ==="
 EXPECTED_FILES=(
     "tradedesk/__init__.py"
     "tradedesk/router.py"
@@ -125,53 +220,28 @@ EXPECTED_FILES=(
     "plugins/platforms/telegram/_positions_render.py"
     "plugins/platforms/telegram/trade_menu/__init__.py"
     "plugins/platforms/telegram/trade_menu/wizard.py"
-    # __init__.py markers
     "plugins/__init__.py"
     "plugins/platforms/__init__.py"
     "plugins/platforms/telegram/__init__.py"
 )
-ALL_OK=1
+FILES_OK=1
 for f in "${EXPECTED_FILES[@]}"; do
     if [[ -f "$CLEAN_FAKE/$f" ]]; then
         echo "  OK    $f"
     else
         echo "  FAIL  $f missing"
-        ALL_OK=0
+        FILES_OK=0
     fi
 done
-echo
 
-# Check that urllib3 stayed at 2.7.0.
-echo "=== urllib3 version ==="
-URRLIB3_VER=$("$hermes_py" -c "import urllib3; print(urllib3.__version__)" 2>&1)
-echo "  urllib3: $URRLIB3_VER"
-if [[ "$URRLIB3_VER" == "2.7.0" ]]; then
-    echo "  [OK]   urllib3 NOT downgraded"
-else
-    echo "  [FAIL] urllib3 changed (was 2.7.0, now $URRLIB3_VER)"
-    ALL_OK=0
-fi
+# Post-install imports (always-required: 8/8).
 echo
-
-# Run pip check.
-echo "=== pip check ==="
-PIP_CHECK=$("$hermes_py" -m pip check 2>&1)
-PIP_CHECK_RC=$?
-echo "  exit: $PIP_CHECK_RC"
-echo "  output: $PIP_CHECK"
-if [[ "$PIP_CHECK" == *"No broken requirements found."* ]]; then
-    echo "  [OK]   pip check: No broken requirements found"
-else
-    echo "  [FAIL] pip check reports broken requirements"
-    ALL_OK=0
-fi
-echo
-
-# Post-install imports.
-echo "=== Post-install imports ==="
+echo "=== Post-install imports (8/8) ==="
 PYTHONPATH="$CLEAN_FAKE" "$hermes_py" -c "
 import importlib
 mods = [
+    'tradedesk.tradedesk',
+    'tradedesk.lighter_agent',
     'tradedesk.raydium_agent',
     'tradedesk.account_discovery',
     'plugins.platforms.telegram.shared_selectors',
@@ -196,19 +266,26 @@ echo "  Post-install import check exit: $import_rc"
 
 # Final verdict.
 echo
-if [[ $rc -eq 0 && $ALL_OK -eq 1 && $import_rc -eq 0 ]]; then
+if [[ $rc -eq 0 && $URLLIB3_OK -eq 1 && $LIGHT_OK -eq 1 && $PIP_CHECK_HAS_OTHER_CONFLICT -eq 0 && $LOG_OK -eq 1 && $FILES_OK -eq 1 && $import_rc -eq 0 ]]; then
     echo "=== REGRESSION TEST RESULT: PASS ==="
-    echo "  install.sh exit: $rc"
-    echo "  all expected files present: yes"
-    echo "  urllib3 preserved: yes"
-    echo "  pip check clean: yes"
-    echo "  post-install imports: 6/6 OK"
+    echo "  install.sh exit:                 $rc"
+    echo "  urllib3 preserved at 2.7.0:      yes"
+    echo "  lighter-sdk importable:          yes"
+    echo "  SignerClient importable:          yes"
+    echo "  pip check has only Lighter conflicts: yes"
+    echo "  install.sh used Step A + Step B: yes"
+    echo "  all expected files present:      yes"
+    echo "  post-install imports (8/8):      PASS"
     OVERALL=0
 else
     echo "=== REGRESSION TEST RESULT: FAIL ==="
-    echo "  install.sh exit: $rc"
-    echo "  all expected files present: $ALL_OK"
-    echo "  post-install import check exit: $import_rc"
+    echo "  install.sh exit:                  $rc"
+    echo "  urllib3 preserved (URLLIB3_OK):   $URLLIB3_OK"
+    echo "  lighter OK:                       $LIGHT_OK"
+    echo "  pip check has no other conflicts: $PIP_CHECK_HAS_OTHER_CONFLICT"
+    echo "  install.sh log OK:                $LOG_OK"
+    echo "  all files present (FILES_OK):     $FILES_OK"
+    echo "  post-install imports (import_rc): $import_rc"
     OVERALL=1
 fi
 

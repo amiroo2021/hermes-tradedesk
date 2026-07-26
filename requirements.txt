@@ -1,26 +1,28 @@
 # Hermes TradeDesk — required Python dependencies
 # -----------------------------------------------------------------------------
-# This list mirrors the EXACT runtime on the DigitalOcean reference production
-# server (commit 49f8f548), filtered to those packages that can be installed
-# on a clean compatible Hermes (e.g. Kamatera v0.19.0) WITHOUT violating
-# the existing Hermes dependency graph.
+# This list is split into two sections:
+#   [main]   - Dependencies installed by pip with normal dependency resolution.
+#              These MUST be compatible with the host Hermes's constraints.
+#   [lighter] - Lighter dependency installed SEPARATELY with --no-deps.
 #
-# Dependency strategy:
-#   - Use full `pip install` (no --no-deps) so transitive deps (eth-hash,
-#     eth-rlp, pycffi, ...) are correctly installed.
-#   - All 11 installable packages here are compatible with
-#     hermes-agent 0.19.0's requirement `urllib3<3,>=2.7.0`.
-#   - `lighter-sdk==1.1.2` is listed under the `# private/` prefix because
-#     it has an INCOMPATIBLE constraint: its metadata requires
-#     `urllib3<2.1.0`, which conflicts with hermes-agent 0.19.0's
-#     `urllib3<3,>=2.7.0`. There is NO overlapping version that satisfies
-#     both. To use the Lighter exchange, the operator must install
-#     `lighter-sdk` manually after the main install (the wizard will
-#     report it as "optional, not importable" during install).
-#   - The `# private/` prefix is recognized by install.sh as documentation-
-#     only — it is NOT passed to `pip install`.
+# Why split:
+#   hermes-agent 0.19.0 requires `urllib3<3,>=2.7.0`.
+#   lighter-sdk 1.1.2 declares `urllib3<2.1.0,>=1.25.3` in its METADATA.
+#   These two constraints have NO overlap. If we install lighter-sdk
+#   through the normal pip resolver, it downgrades urllib3 to <2.1.0
+#   (e.g. 2.0.7), violating Hermes's urllib3 requirement and breaking
+#   the gateway at runtime.
+#
+#   The TradeDesk installer therefore:
+#     - Installs the [main] section with normal dependency resolution.
+#     - Installs lighter-sdk==1.1.2 SEPARATELY with
+#       `pip install --no-deps 'lighter-sdk==1.1.2'` so its resolver
+#       never touches urllib3.
+#     - Before and after the Lighter install, verifies that the host's
+#       urllib3 is still in the Hermes-compatible range (<3,>=2.7.0).
 # -----------------------------------------------------------------------------
 
+# ===== [main] Normal resolver: installed with default pip resolution =====
 # EIP-712 / EVM signing (Rise, AFx, Hyperliquid, Raydium)
 eth-account==0.13.7
 eth-abi==5.0.1
@@ -39,27 +41,27 @@ solders==0.28.0
 # HTTP client (multiple agents; pinned to what production uses)
 requests==2.33.0
 
-# Exchange-specific SDKs (loaded lazily by the agents). All three
-# packages below are compatible with hermes-agent 0.19.0's
-# urllib3<3,>=2.7.0 constraint.
+# Exchange-specific SDKs (loaded lazily). All three are compatible
+# with hermes-agent 0.19.0's urllib3<3,>=2.7.0.
 hyperliquid-python-sdk==0.24.0
 apexomni==3.3.1
 
-# Telegram bot framework (used by the wizard). Compatible with
-# hermes-agent 0.19.0's urllib3<3,>=2.7.0.
+# Telegram bot framework. Compatible with hermes-agent 0.19.0.
 python-telegram-bot==22.6
+
+# ===== [lighter] Special-cased install: --no-deps =====
+# lighter-sdk is the only package whose METADATA declares
+# urllib3<2.1.0,>=1.25.3. Installing it through the normal resolver
+# would downgrade Hermes's urllib3 from 2.7.0 to 2.0.7. Instead, the
+# installer installs it with --no-deps AFTER the [main] dependencies,
+# with explicit urllib3 verification before and after.
+# The line below is informational; the installer reads the marker
+# `lighter: lighter-sdk==1.1.2` and handles it specially.
+lighter: lighter-sdk==1.1.2
 
 # -----------------------------------------------------------------------------
 # Private / off-PyPI / hermes-incompatible packages (documentation only; the
 # installer does NOT pass these to pip). These are private/edge packages
-# or packages whose dependency constraints conflict with hermes-agent
-# 0.19.0.
-#
-# Operators who want to use these exchanges must obtain the package
-# separately and install it manually (e.g. via
-# `pip install /path/to/lighter-sdk-1.1.2.tar.gz --no-deps`).
+# that operators who want those exchanges must obtain and install manually.
 # -----------------------------------------------------------------------------
-# private/ afx-python-sdk==0.1.0   # AFx exchange SDK; private/edge package (not on PyPI)
-# private/ lighter-sdk==1.1.2      # Lighter exchange SDK; conflicts with hermes-agent 0.19.0
-                                   # (requires urllib3<2.1.0; hermes-agent requires urllib3<3,>=2.7.0).
-                                   # Operators who want Lighter must install manually.
+# private/ afx-python-sdk==0.1.0   # AFx exchange SDK; private/edge package
