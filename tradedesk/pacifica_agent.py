@@ -818,12 +818,79 @@ class PacificaAgent:
             return error
         raw = self._get("/api/v1/account", {"account": address})
         data = raw.get("data") if isinstance(raw, Mapping) else None
+        # Best-effort: also fetch open positions so the Balance menu
+        # can render them. Positions are wrapped into Hyperliquid-style
+        # envelopes ({"position": {coin, szi, entryPx, ...}}) so the
+        # exchange-agnostic _format_balance_message renderer reads
+        # them without changes.
+        positions_wrapped = self._fetch_positions_for_balance(address)
+        if positions_wrapped and isinstance(raw, Mapping):
+            exchange_response = dict(raw)
+            exchange_response["positions"] = positions_wrapped
+            exchange_response["assetPositions"] = positions_wrapped
+        else:
+            exchange_response = raw
         return _execution_result(
             request,
             success=bool(raw.get("success", True)) if isinstance(raw, Mapping) else False,
-            exchange_response=raw,
+            exchange_response=exchange_response,
             balance=data if isinstance(data, Mapping) else {},
+            positions=positions_wrapped,
         )
+
+    def _fetch_positions_for_balance(self, address: str) -> list:
+        """Fetch Pacifica open positions and wrap them into
+        Hyperliquid-style envelopes so the exchange-agnostic balance
+        renderer can display them. Returns an empty list on any
+        failure (best-effort; the balance display must still succeed
+        even if positions cannot be fetched).
+        """
+        try:
+            raw = self._get("/api/v1/positions", {"account": address})
+            raw_positions = raw.get("data") if isinstance(raw, Mapping) else []
+            positions = [
+                self._normalize_position(item)
+                for item in raw_positions
+            ] if isinstance(raw_positions, list) else []
+        except Exception as exc:
+            logger.warning(
+                "Pacifica positions fetch failed for balance display on %s: %s",
+                address, exc,
+            )
+            return []
+        out: list = []
+        for pos in positions:
+            wrapped = self._wrap_pacifica_position_for_balance(pos)
+            if wrapped is not None:
+                out.append(wrapped)
+        return out
+
+    @staticmethod
+    def _wrap_pacifica_position_for_balance(pos: Mapping[str, Any]) -> Optional[dict]:
+        """Convert a normalized Pacifica position (Rise-style field
+        names) into a Hyperliquid-style ``{"position": {...}}``
+        envelope that the exchange-agnostic ``_format_balance_message``
+        renderer can read without any exchange-specific branches.
+        Returns ``None`` if the position has zero size.
+        """
+        try:
+            size = float(pos.get("size") or 0)
+        except (TypeError, ValueError):
+            size = 0.0
+        if size <= 0:
+            return None
+        side = str(pos.get("side") or "").lower()
+        szi = size if side != "short" else -size
+        symbol = str(pos.get("symbol") or "").upper()
+        return {
+            "position": {
+                "coin": symbol,
+                "szi": str(szi),
+                "entryPx": pos.get("entry_price"),
+                "unrealizedPnl": pos.get("unrealized_pnl"),
+                "liquidationPx": pos.get("liquidation_price"),
+            }
+        }
 
     def _positions(self, request: Mapping[str, Any]) -> dict:
         address, error = self._require_address(request)

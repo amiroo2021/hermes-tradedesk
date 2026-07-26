@@ -925,6 +925,39 @@ def _hermes_normalize_raydium_position(
     }
 
 
+def _wrap_raydium_position_for_balance(pos: Mapping[str, Any]) -> Optional[dict]:
+    """Convert a normalized Raydium/Orderly position (Rise-style
+    field names) into a Hyperliquid-style ``{"position": {...}}``
+    envelope that the exchange-agnostic ``_format_balance_message``
+    renderer can read without any exchange-specific branches.
+
+    Returns ``None`` if the position has zero size (so flat positions
+    do not pollute the Open Positions block).
+    """
+    try:
+        size = float(pos.get("size") or 0)
+    except (TypeError, ValueError):
+        size = 0.0
+    if size <= 0:
+        return None
+    side = str(pos.get("side") or "").lower()
+    # Hyperliquid convention: ``szi`` is signed (+ long, - short).
+    szi = size if side != "short" else -size
+    symbol = str(pos.get("symbol") or "").upper()
+    return {
+        "position": {
+            "coin": symbol,
+            "szi": str(szi),
+            "entryPx": pos.get("entry_price"),
+            "unrealizedPnl": pos.get("unrealized_pnl"),
+            # Raydium uses ``liq_price`` (snake_case) instead of
+            # Rise's ``liquidation_price``; the renderer's ``else``
+            # branch reads ``liquidationPx`` / ``liqPx``. We map here.
+            "liquidationPx": pos.get("liquidation_price") or pos.get("liq_price"),
+        }
+    }
+
+
 def _hermes_normalize_raydium_order(
     raw: Mapping[str, Any],
 ) -> dict[str, Any]:
@@ -1157,12 +1190,66 @@ class RaydiumAgent:
             "broker_id": RAYDIUM_BROKER_ID,
             "network": RAYDIUM_NETWORK,
         }
+        # Best-effort: also fetch open positions so the Balance menu
+        # can render them. Positions are wrapped into Hyperliquid-style
+        # envelopes ({"position": {coin, szi, entryPx, ...}}) so the
+        # exchange-agnostic _format_balance_message renderer reads
+        # them without changes.
+        positions_wrapped = self._fetch_positions_for_balance(creds)
+        if positions_wrapped:
+            exchange_response["positions"] = positions_wrapped
+            exchange_response["assetPositions"] = positions_wrapped
         return _execution_result(
             request,
             success=True,
             exchange_response=exchange_response,
             balance=balance,
+            positions=positions_wrapped,
         )
+
+    def _fetch_positions_for_balance(self, creds: Any) -> list:
+        """Fetch Raydium/Orderly open positions and wrap them into
+        Hyperliquid-style envelopes so the exchange-agnostic balance
+        renderer can display them. Returns an empty list on any
+        failure (best-effort; the balance display must still succeed
+        even if positions cannot be fetched).
+        """
+        try:
+            client = self._http_client()
+            payload = client._signed_request(
+                creds=creds,
+                method="GET",
+                path="/v1/positions",
+            )
+        except _RaydiumHttpError as exc:
+            logger.warning(
+                "Raydium positions fetch failed for balance display: %s", exc,
+            )
+            return []
+        try:
+            rows: list = []
+            if isinstance(payload, Mapping):
+                data = payload.get("data", {})
+                if isinstance(data, Mapping):
+                    rows = list(data.get("rows") or [])
+                elif isinstance(data, list):
+                    rows = data
+            normalized: list = []
+            for raw in rows:
+                pos = _hermes_normalize_raydium_position(raw)
+                if pos is not None:
+                    normalized.append(pos)
+        except Exception as exc:
+            logger.warning(
+                "Raydium positions normalization failed: %s", exc,
+            )
+            return []
+        out: list = []
+        for pos in normalized:
+            wrapped = _wrap_raydium_position_for_balance(pos)
+            if wrapped is not None:
+                out.append(wrapped)
+        return out
 
     # -- positions -------------------------------------------------------
 

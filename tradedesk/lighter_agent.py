@@ -3248,7 +3248,48 @@ class LighterAgent:
             "totalNtlPos": str(account_entry.get("cross_asset_value") or "0"),
         }
         exchange_response["withdrawable"] = str(account_entry.get("available_balance") or "0")
-        exchange_response["positions"] = list(account_entry.get("positions") or [])
+        # Wrap each normalized Lighter position (Rise-style field
+        # names) into Hyperliquid-style envelopes
+        # ({"position": {coin, szi, entryPx, unrealizedPnl,
+        # liquidationPx}}) so the exchange-agnostic
+        # _format_balance_message renderer can display them without
+        # any exchange-specific branches.
+        #
+        # The raw positions from the Lighter API use
+        # wire-format keys (``sign``, ``position``, ``avg_entry_price``,
+        # ``unrealized_pnl``, etc.) which the renderer can't read
+        # directly. We normalize them via the existing
+        # ``_hermes_normalize_lighter_positions`` helper so the wrap
+        # operates on the canonical Hermes-standard keys.
+        raw_positions = list(account_entry.get("positions") or [])
+        normalized_positions, _active_count = _hermes_normalize_lighter_positions(
+            raw_positions, chain=chain, account=account,
+        )
+        wrapped_positions: list = []
+        for pos in normalized_positions:
+            if not isinstance(pos, Mapping):
+                continue
+            try:
+                size = float(pos.get("size") or 0)
+            except (TypeError, ValueError):
+                size = 0.0
+            if size <= 0:
+                continue
+            side = str(pos.get("side") or "").lower()
+            # Hyperliquid convention: szi is signed (+ long, - short).
+            szi = size if side != "short" else -size
+            symbol = str(pos.get("symbol") or "").upper()
+            wrapped_positions.append({
+                "position": {
+                    "coin": symbol,
+                    "szi": str(szi),
+                    "entryPx": pos.get("entry_price"),
+                    "unrealizedPnl": pos.get("unrealized_pnl"),
+                    "liquidationPx": pos.get("liquidation_price"),
+                }
+            })
+        exchange_response["positions"] = wrapped_positions
+        exchange_response["assetPositions"] = wrapped_positions
 
         return _execution_result(
             request,
@@ -3257,6 +3298,7 @@ class LighterAgent:
             chain=chain,
             exchange_response=exchange_response,
             balance=balance,
+            positions=wrapped_positions,
         )
 
     # -- positions (Phase 2A: read-only) -------------------------------

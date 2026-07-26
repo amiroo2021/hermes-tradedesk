@@ -369,6 +369,16 @@ class AfxAgent:
         # the first wallet and build a normalized envelope that matches
         # the renderer's expected field names.
         normalized = self._normalize_afx_balance(raw)
+        # Also fetch open positions (best-effort: balance display
+        # succeeds even if the positions endpoint fails). The positions
+        # are normalized and then wrapped into Hyperliquid-style
+        # {"position": {"coin": ..., "szi": ..., ...}} so the existing
+        # exchange-agnostic _format_balance_message renderer can read
+        # them without any changes.
+        positions_wrapped = self._fetch_positions_for_balance(wallet)
+        if positions_wrapped:
+            normalized["positions"] = positions_wrapped
+            normalized["assetPositions"] = positions_wrapped
         return _execution_result(
             request,
             success=True,
@@ -376,7 +386,71 @@ class AfxAgent:
             exchange_response=normalized,
             raw_response=raw,
             wallets=(normalized.get("data") if isinstance(normalized, Mapping) else raw.get("data") if isinstance(raw.get("data"), list) else raw),
+            positions=positions_wrapped,
         )
+
+    def _fetch_positions_for_balance(self, wallet: str) -> list:
+        """Fetch AFx open positions and wrap them into Hyperliquid-style
+        envelopes so the exchange-agnostic balance renderer can display
+        them. Returns an empty list on any failure (best-effort).
+        """
+        try:
+            if self.info_client is not None and hasattr(self.info_client, "get_positions"):
+                raw_positions = self.info_client.get_positions(wallet)
+            else:
+                raw_positions = self._get_json(
+                    "/info/position/list",
+                    {"userAddr": wallet, "includeZero": "false"},
+                )
+            products = self._products_response()
+            try:
+                raw_orders = self._get_open_orders(wallet)
+            except Exception:
+                raw_orders = []
+            positions = self._normalize_positions(raw_positions, products, raw_orders=raw_orders)
+        except Exception as exc:
+            logger.warning(
+                "AFX positions fetch failed for balance display on %s: %s",
+                wallet, exc,
+            )
+            return []
+        # Wrap each Rise-style position dict into Hyperliquid-style.
+        out: list = []
+        for pos in positions:
+            if not isinstance(pos, Mapping):
+                continue
+            wrapped = self._wrap_afx_position_for_balance(pos)
+            if wrapped is not None:
+                out.append(wrapped)
+        return out
+
+    @staticmethod
+    def _wrap_afx_position_for_balance(pos: Mapping[str, Any]) -> Optional[dict]:
+        """Convert a normalized AFx position (Rise-style field names)
+        into a Hyperliquid-style ``{"position": {...}}`` envelope that
+        the exchange-agnostic _format_balance_message renderer can read.
+        Returns ``None`` if the position has zero size.
+        """
+        try:
+            size = float(pos.get("size") or 0)
+        except (TypeError, ValueError):
+            size = 0.0
+        if size <= 0:
+            return None
+        side = str(pos.get("side") or "").lower()
+        # Hyperliquid convention: szi is signed (+ long, - short).
+        szi = size if side != "short" else -size
+        symbol = str(pos.get("symbol") or pos.get("asset") or "").upper()
+        liq_price = pos.get("liquidation_price")
+        return {
+            "position": {
+                "coin": symbol,
+                "szi": str(szi),
+                "entryPx": pos.get("entry_price"),
+                "unrealizedPnl": pos.get("unrealized_pnl"),
+                "liquidationPx": liq_price,
+            }
+        }
 
     @staticmethod
     def _normalize_afx_balance(raw: Mapping[str, Any]) -> dict:
