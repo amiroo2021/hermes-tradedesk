@@ -1,0 +1,11 @@
+--- a/hermes_cli/commands.py
++++ b/hermes_cli/commands.py
+@@ -65,4 +65,8 @@
+     # Session
+     CommandDef("start", "Acknowledge platform start pings without a reply", "Session",
++               gateway_only=True),
++    CommandDef("trade", "Open the Telegram trading console wizard", "Trading",
++               gateway_only=True),
++    CommandDef("positions", "Open the Telegram open-positions manager", "Trading",
+                gateway_only=True),
+     CommandDef("new", "Start a new session (fresh session ID + history)", "Session",

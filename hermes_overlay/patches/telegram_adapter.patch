@@ -1,0 +1,83 @@
+--- a/plugins/platforms/telegram/adapter.py
++++ b/plugins/platforms/telegram/adapter.py
+@@ -796,4 +796,8 @@
+             else 20 * 1024 * 1024
+         )
++        # Interactive /trade wizard state per chat_id:user_id (plugin-local trade_menu)
++        self._trade_menu_state: Dict[str, dict] = {}
++        # Interactive /positions menu state per chat_id:user_id (plugin-local positions_menu)
++        self._positions_menu_state: Dict[str, dict] = {}
+         # Interactive model picker state per chat
+         self._model_picker_state: Dict[str, dict] = {}
+@@ -5894,4 +5898,30 @@
+ 
+         # --- Model picker callbacks ---
++        # --- Trade console callbacks (tm:...) ---
++        if data.startswith("tm:"):
++            try:
++                from plugins.platforms.telegram.trade_menu import handle_trade_callback
++                await handle_trade_callback(self, query, data)
++            except Exception as exc:
++                logger.error("[%s] /trade callback failed: %s", self.name, exc, exc_info=True)
++                try:
++                    await query.answer(text="Trade wizard error.")
++                except Exception:
++                    pass
++            return
++
++        # --- Positions menu callbacks (pm:...) ---
++        if data.startswith("pm:"):
++            try:
++                from plugins.platforms.telegram.positions_menu import handle_positions_callback
++                await handle_positions_callback(self, query, data)
++            except Exception as exc:
++                logger.error("[%s] /positions callback failed: %s", self.name, exc, exc_info=True)
++                try:
++                    await query.answer(text="Positions menu error.")
++                except Exception:
++                    pass
++            return
++
+         if data.startswith(("mp:", "mpg:", "mpv:", "mm:", "mc:", "mb", "mx", "mg:")):
+             chat_id = str(query.message.chat_id) if query.message else None
+@@ -8137,4 +8167,18 @@
+         await self._ensure_forum_commands(update.message)
+ 
++        try:
++            from plugins.platforms.telegram.trade_menu import handle_trade_text
++            if await handle_trade_text(self, msg):
++                return
++        except Exception as exc:
++            logger.error("[%s] /trade text wizard failed: %s", self.name, exc, exc_info=True)
++
++        try:
++            from plugins.platforms.telegram.positions_menu import handle_positions_text
++            if await handle_positions_text(self, msg):
++                return
++        except Exception as exc:
++            logger.error("[%s] /positions text menu failed: %s", self.name, exc, exc_info=True)
++
+         event = self._build_message_event(msg, MessageType.TEXT, update_id=update.update_id)
+         event.text = self._clean_bot_trigger_text(event.text)
+@@ -8148,4 +8192,21 @@
+         if not msg or not msg.text:
+             return
++
++        # Plugin-local Telegram control surfaces. Handle before the generic
++        # group mention gate so bare /trade and /positions work in allowed
++        # forum topics instead of requiring @BotName or reply-to-bot triggers.
++        try:
++            from plugins.platforms.telegram.trade_menu import handle_trade_command
++            if await handle_trade_command(self, msg):
++                return
++        except Exception as exc:
++            logger.error("[%s] /trade command failed: %s", self.name, exc, exc_info=True)
++
++        try:
++            from plugins.platforms.telegram.positions_menu import handle_positions_command
++            if await handle_positions_command(self, msg):
++                return
++        except Exception as exc:
++            logger.error("[%s] /positions command failed: %s", self.name, exc, exc_info=True)
+         if not self._should_process_message(msg, is_command=True):
+             return

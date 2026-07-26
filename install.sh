@@ -727,6 +727,75 @@ cp "$SRC_OVERLAY/telegram/trade_menu/wizard.py" \
 say "  Installed 4 Telegram overlay files + 4 __init__.py markers"
 
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# PHASE 8.5 — Apply /trade wiring patches to upstream Hermes files.
+#
+# The wizard files we just copied are not reachable from Telegram unless
+# the upstream `plugins/platforms/telegram/adapter.py` and
+# `hermes_cli/commands.py` have the trade dispatch calls and the /trade
+# command menu entry. Upstream hermes-agent 0.19.0 does NOT have these.
+# We apply surgical unified-diff patches to add them. The patches are
+# minimal (11 lines for commands.py, 83 lines for adapter.py) and only
+# touch the trade/positions wiring — no other upstream code is modified.
+#
+# Both patches target the EXACT upstream hermes-agent 0.19.0 layout
+# (commit 07e97d2f5dc3d2092cfe693ef07b2527a36cd2d8). On a different
+# upstream version, `patch` would fail with offset mismatches and the
+# install would ABORT. This is intentional: the patches are only valid
+# against the documented upstream version.
+# ---------------------------------------------------------------------------
+say ""
+say "Phase 8.5: apply /trade wiring patches to upstream Hermes files..."
+
+PATCHES_DIR="$SRC_OVERLAY/patches"
+ADAPTER_PATCH="$PATCHES_DIR/telegram_adapter.patch"
+COMMANDS_PATCH="$PATCHES_DIR/hermes_cli_commands.patch"
+
+# Apply commands.py patch to $HERMES_HOME/hermes_cli/commands.py.
+if [[ -f "$HERMES_HOME/hermes_cli/commands.py" ]] && [[ -f "$COMMANDS_PATCH" ]]; then
+    backup_file "$HERMES_HOME/hermes_cli/commands.py"
+    say "  Applying $COMMANDS_PATCH..."
+    if (cd "$HERMES_HOME" && patch -p1 --dry-run -i "$COMMANDS_PATCH") >/dev/null 2>&1; then
+        if (cd "$HERMES_HOME" && patch -p1 -i "$COMMANDS_PATCH") >/dev/null 2>&1; then
+            say "  [OK]   commands.py patch applied"
+        else
+            err "  [FAIL] commands.py patch FAILED. Upstream hermes_cli/commands.py"
+            err "         may have a different layout than the documented"
+            err "         hermes-agent 0.19.0. See $COMMANDS_PATCH for the expected diff."
+            exit 1
+        fi
+    else
+        err "  [FAIL] commands.py patch dry-run FAILED. Upstream layout does not match."
+        err "         This is expected if you are on a different hermes-agent version."
+        err "         See $COMMANDS_PATCH for the expected diff."
+        exit 1
+    fi
+else
+    say "  [WARN] commands.py or $COMMANDS_PATCH not found; skipping"
+fi
+
+# Apply adapter.py patch to $HERMES_HOME/plugins/platforms/telegram/adapter.py.
+if [[ -f "$HERMES_HOME/plugins/platforms/telegram/adapter.py" ]] && [[ -f "$ADAPTER_PATCH" ]]; then
+    backup_file "$HERMES_HOME/plugins/platforms/telegram/adapter.py"
+    say "  Applying $ADAPTER_PATCH..."
+    if (cd "$HERMES_HOME" && patch -p1 --dry-run -i "$ADAPTER_PATCH") >/dev/null 2>&1; then
+        if (cd "$HERMES_HOME" && patch -p1 -i "$ADAPTER_PATCH") >/dev/null 2>&1; then
+            say "  [OK]   adapter.py patch applied"
+        else
+            err "  [FAIL] adapter.py patch FAILED. Upstream"
+            err "         plugins/platforms/telegram/adapter.py may have a different"
+            err "         layout than the documented hermes-agent 0.19.0."
+            err "         See $ADAPTER_PATCH for the expected diff."
+            exit 1
+        fi
+    else
+        err "  [FAIL] adapter.py patch dry-run FAILED. Upstream layout does not match."
+        err "         See $ADAPTER_PATCH for the expected diff."
+        exit 1
+    fi
+else
+    say "  [WARN] adapter.py or $ADAPTER_PATCH not found; skipping"
+fi
 # PHASE 9 — POST-INSTALL integration/import verification.
 #
 # This is the final check: with PYTHONPATH set to the Hermes install
