@@ -1,0 +1,51 @@
+# Hermes TradeDesk — required Python dependencies
+# -----------------------------------------------------------------------------
+# This list mirrors the EXACT runtime on the DigitalOcean reference production
+# server (commit 49f8f548). It contains every Python package imported by
+# the tradedesk/ agents or the Telegram /trade wizard, except for:
+#
+#   - stdlib (json, typing, decimal, hashlib, urllib, etc.)
+#   - hermes_cli / hermes_agent / plugins.platforms.* (these ship with
+#     Hermes itself; not installed by us)
+#
+# If a pip install is needed at install time, the installer runs
+#   python -m pip install --no-deps -r requirements.txt
+# against the existing Hermes venv. --no-deps avoids accidentally
+# downgrading shared transitive dependencies (eth-account, eth-utils,
+# web3, etc., are all shared with upstream Hermes code).
+#
+# The fallback chain in rise_agent.py keeps keccak256 working without
+# `pysha3` because pycryptodome is listed below. Do not add pysha3
+# unless the working implementation actually requires it.
+# -----------------------------------------------------------------------------
+
+# EIP-712 / EVM signing (Rise, AFx, Hyperliquid, Raydium)
+eth-account==0.13.7
+eth-abi==5.0.1
+eth-utils==5.3.1
+pycryptodome==3.23.0
+
+# Cryptographic primitives (transitive; pinned for reproducibility)
+cryptography==46.0.7
+
+# Base58 encoding (Pacifica, Raydium)
+base58==2.1.1
+
+# Solana signing (Pacifica)
+solders==0.28.0
+
+# HTTP client (multiple agents; standard library, but Hermes venv may
+# have a different version, so we pin to what production uses)
+requests==2.33.0
+
+# Exchange-specific SDKs (loaded lazily; agents that need them will
+# error at runtime only when their code path is exercised)
+hyperliquid-python-sdk==0.24.0
+apexomni==3.3.1
+afx-python-sdk==0.1.0
+
+# Lighter perpetuals exchange SDK
+lighter-sdk==1.1.2
+
+# Telegram bot framework (used by the wizard)
+python-telegram-bot==22.6

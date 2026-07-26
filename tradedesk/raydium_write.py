@@ -347,7 +347,7 @@ def execute_order(
     Input contract (post-TradeDesk routing):
         operation: "order"
         exchange: "raydium"
-        account: "phantom"
+        account: "example"
         symbol: "PERP_XXX_USDC"
         side: "BUY" | "SELL"
         order_type: "LIMIT"
@@ -641,7 +641,7 @@ def execute_batch_orders(
     Input contract (post-TradeDesk routing):
         operation: "batch_orders"
         exchange: "raydium"
-        account: "phantom"
+        account: "example"
         child_orders: list of dicts, each shaped like a single-order
             StructuredTradeRequest (version, operation="order",
             exchange, account, symbol, side, order_type, price, quantity,
@@ -1349,7 +1349,7 @@ def execute_cancel(
     Input contract:
         operation: "cancel_order"
         exchange: "raydium"
-        account: "phantom"
+        account: "example"
         symbol: "PERP_XXX_USDC"
         order_id: int/string
 

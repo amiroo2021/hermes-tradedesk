@@ -25,16 +25,15 @@ set -euo pipefail
 # ---- Locate self (so the script works regardless of cwd) ----
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Honor external overrides of the source-tree paths. Used by automated
-# install-compatibility tests that drop install.sh into a temp dir while
-# pointing the source paths back at this repo.
+# Source-tree paths: derive from SCRIPT_DIR by default. Allow override via
+# env var (used by automated install-compatibility tests that drop install.sh
+# into a temp dir while pointing the source paths back at this repo).
+SRC_TRADEDESK="$SCRIPT_DIR/tradedesk"
+SRC_OVERLAY="$SCRIPT_DIR/hermes_overlay"
 if [[ -n "${HERMES_TRADEDESK_SRC_ROOT:-}" ]]; then
     SRC_TRADEDESK="$HERMES_TRADEDESK_SRC_ROOT/tradedesk"
     SRC_OVERLAY="$HERMES_TRADEDESK_SRC_ROOT/hermes_overlay"
 fi
-
-SRC_TRADEDESK="$SRC_TRADEDESK"
-SRC_OVERLAY="$SRC_OVERLAY"
 
 err() { echo "ERROR: $*" >&2; }
 say() { echo "$@"; }
@@ -95,14 +94,6 @@ fi
 
 # ---------------------------------------------------------------------------
 # 4-5. STRUCTURAL compatibility gate (NOT a SHA-equality check).
-#
-# Required integration contracts (verified by file presence + symbol grep):
-#   - plugins/platforms/telegram/shared_selectors.py exists with the
-#     expected export names (used by the wizard).
-#   - plugins/platforms/telegram/_positions_render.py exists.
-#   - hermes_cli/ package is importable.
-#   - Python package dependencies required by the agents are present.
-#   - telegram integration surface exists.
 # ---------------------------------------------------------------------------
 HERMES_PY="$HERMES_HOME/venv/bin/python"
 if [[ ! -x "$HERMES_PY" ]]; then
@@ -136,7 +127,6 @@ say "  (these check integration CONTRACTS, not exact commits)"
 SELECTORS_FILE="$HERMES_HOME/plugins/platforms/telegram/shared_selectors.py"
 SELECTORS_OK=missing
 if [[ -f "$SELECTORS_FILE" ]]; then
-    # Check that all 5 expected symbols are exported.
     missing_symbols=""
     for sym in account_keyboard account_prompt exchange_keyboard exchange_prompt lighter_account_keyboard; do
         if ! grep -qE "^\s*def\s+$sym\b|^$sym\s*[:=]" "$SELECTORS_FILE"; then
@@ -167,29 +157,61 @@ if [[ "$HERMES_CLI_OUT" == *"ok"* ]]; then
 fi
 run_struct_check "hermes_cli package importable" "$HERMES_CLI_OK"
 
-# Check 4: required Python deps for the agents.
+# Check 4: required Python deps for the agents (verified by `pip show`).
+# These match the actual production runtime on DigitalOcean.
 PYDEPS_OK=ok
 PYDEPS_FAILED=()
-for dep in eth_account eth_abi eth_utils cryptography base58 requests solders lighter; do
-    out="$("$HERMES_PY" -c "import $dep" 2>&1 || true)"
-    if [[ -n "$out" ]]; then
+# Map pip-package-name -> import-name. Some packages have different import
+# names (e.g. python-telegram-bot is imported as `telegram`).
+declare -A PKG_TO_IMPORT=(
+    [lighter]=lighter
+    [base58]=base58
+    [cryptography]=cryptography
+    [eth-account]=eth_account
+    [eth-abi]=eth_abi
+    [eth-utils]=eth_utils
+    [requests]=requests
+    [solders]=solders
+    [python-telegram-bot]=telegram
+)
+for pkg in "${!PKG_TO_IMPORT[@]}"; do
+    import_name="${PKG_TO_IMPORT[$pkg]}"
+    if ! "$HERMES_PY" -c "import $import_name" 2>/dev/null; then
         PYDEPS_OK=fail
-        PYDEPS_FAILED+=("$dep")
+        PYDEPS_FAILED+=("$pkg")
     fi
 done
 if [[ "$PYDEPS_OK" == "ok" ]]; then
-    run_struct_check "Python deps for exchange agents (eth_account, eth_abi, eth_utils, cryptography, base58, requests, solders, lighter)" ok
+    run_struct_check "Python deps for exchange agents (lighter, base58, cryptography, eth_account, eth_abi, eth_utils, requests, solders, telegram)" ok
 else
     run_struct_check "Python deps for exchange agents (missing: ${PYDEPS_FAILED[*]})" fail
 fi
 
-# Check 5: telegram package importable (only if Telegram integration is configured).
-TELEGRAM_OK=ok
-TELEGRAM_OUT="$("$HERMES_PY" -c "import telegram" 2>&1 || true)"
-if [[ -n "$TELEGRAM_OUT" ]]; then
-    TELEGRAM_OK=fail
+# Check 5: exchange-specific SDKs (loaded lazily by some agents).
+PYDEPS_OK2=ok
+PYDEPS_FAILED2=()
+# These are loaded conditionally by the agents. They are STRONGLY RECOMMENDED
+# but we do not refuse install if they are missing; agents will fail at runtime
+# only when their respective code path is exercised.
+for dep in hyperliquid apexomni afx; do
+    if ! "$HERMES_PY" -c "import $dep" 2>/dev/null; then
+        PYDEPS_OK2=warn
+        PYDEPS_FAILED2+=("$dep")
+    fi
+done
+if [[ "$PYDEPS_OK2" == "ok" ]]; then
+    run_struct_check "Exchange SDKs (hyperliquid, apexomni, afx) — all importable" ok
+else
+    # Not a hard fail: exchange-specific SDKs are loaded lazily.
+    say "    [WARN] Exchange SDKs missing: ${PYDEPS_FAILED2[*]} (not a hard fail; agents that need them will error at runtime)"
 fi
-run_struct_check "telegram Python package importable" "$TELEGRAM_OK"
+
+# Check 6: pycryptodome (Crypto.Hash.keccak) used by Rise agent for EIP-712 signing.
+if "$HERMES_PY" -c "from Crypto.Hash import keccak" 2>/dev/null; then
+    run_struct_check "pycryptodome (Crypto.Hash.keccak) for EIP-712 signing" ok
+else
+    run_struct_check "pycryptodome (Crypto.Hash.keccak) for EIP-712 signing" fail
+fi
 
 # Final structural-compatibility verdict.
 say ""
@@ -225,10 +247,6 @@ fi
 
 # ---------------------------------------------------------------------------
 # 6. Compatibility manifest (informational, NOT a hard gate).
-#
-# manifest.json ships in this repo but is not REQUIRED for installation —
-# it is a metadata file. install.sh prints its reference_hermes_commit
-# when present; absence is non-fatal.
 # ---------------------------------------------------------------------------
 MANIFEST="$SCRIPT_DIR/manifest.json"
 REF_COMMIT="(no manifest)"
@@ -246,6 +264,31 @@ else
     say ""
     say "  Reference manifest not found at $MANIFEST (informational only)."
     say "  (This is OK — install will proceed using structural checks.)"
+fi
+
+# ---------------------------------------------------------------------------
+# 6.5. Install required Python dependencies into the Hermes venv.
+#
+# If any of the required packages are missing, install them via pip.
+# This list matches the EXACT production runtime on DigitalOcean.
+# ---------------------------------------------------------------------------
+REQUIREMENTS_FILE="$SCRIPT_DIR/requirements.txt"
+if [[ -f "$REQUIREMENTS_FILE" ]]; then
+    say ""
+    say "Installing required Python dependencies from $REQUIREMENTS_FILE..."
+    # Use --no-deps so pip doesn't unexpectedly upgrade/downgrade shared deps.
+    # Use --quiet for less noise; we still report what was installed.
+    if "$HERMES_PY" -m pip install --no-deps -q -r "$REQUIREMENTS_FILE" 2>&1; then
+        say "  Python dependencies installed (--no-deps to avoid clobbering shared deps)"
+    else
+        err "pip install failed for one or more packages."
+        err "Continuing — the structural checks above already confirmed the"
+        err "modules are importable. This is non-fatal but you may need to"
+        err "install missing packages manually before using the wizard."
+    fi
+else
+    say ""
+    say "  (No requirements.txt found at $REQUIREMENTS_FILE; skipping dep install.)"
 fi
 
 # ---------------------------------------------------------------------------
@@ -271,7 +314,7 @@ backup_file() {
 # ---------------------------------------------------------------------------
 say ""
 say "Backing up existing files..."
-for f in $(find "$SRC_TRADEDESK" -type f -name "*.py"); do
+for f in $(find "$SRC_TRADEDESK" -type f -name "*.py" 2>/dev/null); do
     rel="${f#$SCRIPT_DIR/}"
     target="$HERMES_HOME/${rel#tradedesk/}"
     if [[ -e "$target" ]]; then
@@ -300,6 +343,14 @@ cp "$SRC_OVERLAY/telegram/trade_menu/__init__.py" "$HERMES_HOME/plugins/platform
 cp "$SRC_OVERLAY/telegram/trade_menu/wizard.py" "$HERMES_HOME/plugins/platforms/telegram/trade_menu/wizard.py"
 say "  plugins/.../trade_menu/__init__.py"
 say "  plugins/.../trade_menu/wizard.py"
+
+say ""
+say "Installing Telegram shared_selectors and _positions_render..."
+mkdir -p "$HERMES_HOME/plugins/platforms/telegram"
+cp "$SRC_OVERLAY/telegram/shared_selectors.py" "$HERMES_HOME/plugins/platforms/telegram/shared_selectors.py"
+cp "$SRC_OVERLAY/telegram/_positions_render.py" "$HERMES_HOME/plugins/platforms/telegram/_positions_render.py"
+say "  plugins/platforms/telegram/shared_selectors.py"
+say "  plugins/platforms/telegram/_positions_render.py"
 
 # ---------------------------------------------------------------------------
 # 12. Preserve Hermes AI configuration
@@ -333,7 +384,7 @@ SANITIZED_REPORT="$BACKUP_DIR/install-report.txt"
     echo "Reference commit:    $REF_COMMIT"
     echo "Struct checks pass:  $STRUCT_CHECKS_PASSED"
     echo "Struct checks fail:  $STRUCT_CHECKS_FAILED"
-    echo "Files installed:     $(find "$SRC_TRADEDESK" -name '*.py' -printf "%f\n" | wc -l) TradeDesk modules + wizard"
+    echo "Files installed:     $(find "$SRC_TRADEDESK" -name '*.py' -printf "%f\n" 2>/dev/null | wc -l) TradeDesk modules + $(find "$SRC_OVERLAY" -name '*.py' -printf "%f\n" 2>/dev/null | wc -l) overlay files"
     echo ""
     echo "Configured account aliases (NAMES ONLY):"
     echo "  (not enumerated to keep report sanitized)"

@@ -44,12 +44,20 @@ class TestPortableStructure(unittest.TestCase):
                 f"Missing production module: tradedesk/{f}",
             )
 
-        required_overlay = ["__init__.py", "wizard.py"]
-        for f in required_overlay:
+        required_overlay = [
+            ("hermes_overlay/telegram/trade_menu/__init__.py", "trade_menu/__init__.py"),
+            ("hermes_overlay/telegram/trade_menu/wizard.py", "trade_menu/wizard.py"),
+            ("hermes_overlay/telegram/shared_selectors.py", "shared_selectors.py"),
+            ("hermes_overlay/telegram/_positions_render.py", "_positions_render.py"),
+        ]
+        for path, label in required_overlay:
             self.assertTrue(
-                (PROJECT / "hermes_overlay" / "telegram" / "trade_menu" / f).exists(),
-                f"Missing integration module: hermes_overlay/.../{f}",
+                (PROJECT / path).exists(),
+                f"Missing integration module: {label}",
             )
+
+    def test_requirements_txt_exists(self):
+        self.assertTrue((PROJECT / "requirements.txt").exists())
 
     def test_env_example_is_present(self):
         self.assertTrue((PROJECT / ".env.example").exists())

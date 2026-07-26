@@ -103,7 +103,7 @@ The wizard passes only the account identifier -- no chain field, no
 broker field::
 
     { "version": 1, "operation": "balance",
-      "exchange": "raydium", "account": "phantom" }
+      "exchange": "raydium", "account": "example" }
 
 RaydiumAgent reads ``RAYDIUM_<account>_*`` internally. TradeDesk
 remains exchange-agnostic; it does not need to know about Orderly,
